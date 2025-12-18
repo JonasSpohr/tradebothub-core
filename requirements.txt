@@ -1,0 +1,8 @@
+ccxt==4.4.90
+pandas==2.2.2
+numpy==2.0.1
+psycopg2-binary==2.9.9
+cryptography==43.0.1
+requests==2.32.3
+# optional:
+# newrelic==9.12.0

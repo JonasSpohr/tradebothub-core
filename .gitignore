@@ -1,0 +1,86 @@
+# =========================
+# Python
+# =========================
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# =========================
+# Virtual environments
+# =========================
+.venv/
+venv/
+env/
+ENV/
+
+# =========================
+# Secrets & local config
+# =========================
+.env
+.env.*
+*.secret
+*.key
+*.pem
+
+# Fernet key (never commit)
+fernet.key
+
+# =========================
+# Bot runtime artifacts
+# =========================
+logs/
+*.log
+state.json
+bot_state.json
+trades_log.csv
+equity_log.csv
+
+# =========================
+# Docker
+# =========================
+*.tar
+docker-compose.override.yml
+
+# =========================
+# Fly.io
+# =========================
+.fly/
+fly.toml.local
+fly.secrets.*
+
+# =========================
+# GitHub Actions (local)
+# =========================
+.act/
+.github/.env
+
+# =========================
+# Node / tooling (if present)
+# =========================
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
+
+# =========================
+# OS
+# =========================
+.DS_Store
+Thumbs.db
+
+# =========================
+# IDEs / Editors
+# =========================
+.vscode/
+.idea/
+*.swp
+*.swo

@@ -1,0 +1,21 @@
+name: Stop Fly App
+
+on:
+  workflow_dispatch:
+    inputs:
+      fly_app:
+        description: "Fly app name"
+        required: true
+
+jobs:
+  stop:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install flyctl
+        uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Scale to zero
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+        run: |
+          flyctl scale count 0 --app "${{ inputs.fly_app }}"
