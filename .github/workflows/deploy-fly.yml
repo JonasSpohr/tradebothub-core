@@ -17,6 +17,18 @@ on:
         description: "JSON object of secrets to set on Fly app"
         required: false
         default: "{}"
+      command:
+        required: true
+        type: string
+      version_tag:
+        required: true
+        type: string
+      bot_id:
+        required: true
+        type: string
+      subscription_id:
+        required: false
+        type: string
 
 jobs:
   deploy:
