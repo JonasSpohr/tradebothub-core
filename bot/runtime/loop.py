@@ -1,7 +1,7 @@
 import time
 from bot.core.logging import log
 from bot.core.safety import MAX_CONSECUTIVE_ERRORS, ERROR_BACKOFF_SECONDS
-from bot.infra.db import write_event
+from bot.infra.db import write_event, notify
 from bot.core.types import BotContext
 from bot.strategies import get_strategy
 from bot.trading.position import manage_open_position, try_open_position
@@ -28,6 +28,14 @@ def run_loop(ctx: BotContext):
 
             if consec >= MAX_CONSECUTIVE_ERRORS:
                 write_event(ctx.id, ctx.user_id, "stopped", "Too many consecutive errors")
+                notify(
+                    ctx.user_id,
+                    ctx.id,
+                    "bot_stopped",
+                    "Bot stopped",
+                    body="Too many consecutive errors",
+                    severity="critical",
+                )
                 log("Too many consecutive errors; exiting.")
                 return
 

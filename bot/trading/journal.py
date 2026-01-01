@@ -1,4 +1,10 @@
-from bot.infra.db import write_event, insert_trade, insert_position_open, close_position
+from bot.infra.db import (
+    write_event,
+    insert_trade,
+    insert_position_open,
+    close_position,
+    notify,
+)
 
 def event(ctx, typ: str, msg: str):
     write_event(ctx.id, ctx.user_id, typ, msg)
@@ -18,6 +24,15 @@ def on_entry(ctx, direction: str, entry_price: float, entry_time: str, qty: floa
         exchange_order_id=None,
         executed_at=entry_time,
     )
+    notify(
+        ctx.user_id,
+        ctx.id,
+        "trade_opened",
+        f"Entered {direction.upper()}",
+        body=f"price={entry_price:.6f} qty={qty}",
+        severity="info",
+        metadata={"position_id": position_id, "direction": direction, "price": entry_price, "qty": qty},
+    )
     return position_id
 
 def on_pyramid(ctx, position_id: str, direction: str, price: float, qty: float, executed_at: str):
@@ -32,6 +47,15 @@ def on_pyramid(ctx, position_id: str, direction: str, price: float, qty: float, 
         pnl=None,
         exchange_order_id=None,
         executed_at=executed_at,
+    )
+    notify(
+        ctx.user_id,
+        ctx.id,
+        "trade_scaled",
+        f"Scaled {direction.upper()}",
+        body=f"price={price:.6f} qty={qty}",
+        severity="info",
+        metadata={"position_id": position_id, "direction": direction, "price": price, "qty": qty},
     )
 
 def on_exit(ctx, position_id: str, direction: str, exit_price: float, exit_time: str, qty: float, realized_pnl: float, reason: str):
@@ -51,3 +75,20 @@ def on_exit(ctx, position_id: str, direction: str, exit_price: float, exit_time:
     )
 
     event(ctx, "trade", f"EXIT {direction} {reason} price={exit_price:.6f} pnl={realized_pnl:.4f}")
+    severity = "warning" if realized_pnl < 0 else "info"
+    notify(
+        ctx.user_id,
+        ctx.id,
+        "trade_closed",
+        f"Exited {direction.upper()}",
+        body=f"{reason} price={exit_price:.6f} pnl={realized_pnl:.4f}",
+        severity=severity,
+        metadata={
+            "position_id": position_id,
+            "direction": direction,
+            "price": exit_price,
+            "qty": qty,
+            "pnl": realized_pnl,
+            "reason": reason,
+        },
+    )

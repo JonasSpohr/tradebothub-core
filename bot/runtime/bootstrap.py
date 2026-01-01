@@ -1,6 +1,6 @@
 from bot.core.types import BotContext
 from bot.core.config import normalize_configs
-from bot.infra.db import fetch_bot_context_row, write_event
+from bot.infra.db import fetch_bot_context_row, write_event, notify
 from bot.core.logging import log
 
 def load_context(bot_id: str) -> BotContext:
@@ -44,8 +44,24 @@ def start(bot_id: str):
     ok, reason = startup_gate(ctx)
     if not ok:
         write_event(ctx.id, ctx.user_id, "stopped", f"Startup blocked: {reason}")
+        notify(
+            ctx.user_id,
+            ctx.id,
+            "startup_blocked",
+            "Bot startup blocked",
+            body=reason,
+            severity="warning",
+        )
         log(f"Startup blocked: {reason}")
         return
 
     write_event(ctx.id, ctx.user_id, "started", f"strategy={ctx.strategy} tf={ctx.execution_config['timeframe']}")
+    notify(
+        ctx.user_id,
+        ctx.id,
+        "bot_started",
+        "Bot started",
+        body=f"strategy={ctx.strategy} tf={ctx.execution_config['timeframe']}",
+        severity="info",
+    )
     run_loop(ctx)

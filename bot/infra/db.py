@@ -22,6 +22,34 @@ def _ensure_data(resp, ctx: str):
         raise RuntimeError(f"{ctx}: empty response")
     return resp.data
 
+def notify(
+    user_id: str,
+    bot_id: Optional[str],
+    typ: str,
+    title: str,
+    body: Optional[str] = None,
+    severity: str = "info",
+    channel: str = "in_app",
+    metadata: Optional[Dict[str, Any]] = None,
+):
+    """
+    Fire-and-forget notification insert; failures are ignored to avoid impacting the bot loop.
+    """
+    try:
+        sb = supabase_client()
+        sb.table("notifications").insert({
+            "user_id": user_id,
+            "bot_id": bot_id,
+            "channel": channel,
+            "type": typ,
+            "severity": severity,
+            "title": title,
+            "body": body,
+            "metadata": metadata or {},
+        }).execute()
+    except Exception:
+        pass
+
 def fetch_bot_context_row(bot_id: str) -> Dict[str, Any]:
     sb = supabase_client()
     # Expect a view named bot_context_view that returns the joined bot context (see deploy SQL).
