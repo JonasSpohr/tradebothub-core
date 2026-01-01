@@ -1,138 +1,94 @@
 import os, json
-from typing import Any, Dict
-import psycopg2
-import psycopg2.extras
+from typing import Any, Dict, Optional
+from supabase import Client, create_client
 
-def conn():
-    return psycopg2.connect(
-        host=os.environ["DB_HOST"],
-        dbname=os.environ["DB_NAME"],
-        user=os.environ["DB_USER"],
-        password=os.environ["DB_PASSWORD"],
-        sslmode="require",
-    )
+_supabase: Optional[Client] = None
+
+def supabase_client() -> Client:
+    """
+    Lazy-init Supabase client using the service role key for full DB access.
+    """
+    global _supabase
+    if _supabase is None:
+        url = os.environ["SUPABASE_URL"]
+        key = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
+        _supabase = create_client(url, key)
+    return _supabase
+
+def _ensure_data(resp, ctx: str):
+    if getattr(resp, "error", None):
+        raise RuntimeError(f"{ctx}: {resp.error}")
+    if resp.data is None:
+        raise RuntimeError(f"{ctx}: empty response")
+    return resp.data
 
 def fetch_bot_context_row(bot_id: str) -> Dict[str, Any]:
-    q = """
-    select
-      b.id, b.user_id, b.name, b.strategy, b.mode, b.dry_run,
-      b.strategy_config, b.risk_config, b.execution_config, b.control_config,
-      s.status as subscription_status,
-      se.ccxt_id as exchange_ccxt_id,
-      sm.symbol as market_symbol,
-      ak.api_key_encrypted, ak.api_secret_encrypted, ak.api_password_encrypted, ak.api_uid_encrypted
-    from public.bots b
-    join public.subscriptions s on s.bot_id = b.id
-    join public.supported_exchanges se on se.id = b.exchange_id
-    join public.supported_markets sm on sm.id = b.market_id
-    join public.api_keys ak on ak.bot_id = b.id
-    where b.id = %s
-    limit 1
-    """
-    with conn() as c:
-        with c.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(q, (bot_id,))
-            row = cur.fetchone()
+    sb = supabase_client()
+    # Expect a view named bot_context_view that returns the joined bot context (see deploy SQL).
+    resp = sb.table("bot_context_view").select("*").eq("id", bot_id).single().execute()
+    row = resp.data
     if not row:
         raise RuntimeError(f"bot_not_found: {bot_id}")
     return dict(row)
 
 def write_event(bot_id: str, user_id: str, event_type: str, message: str):
-    q = """
-    insert into public.bot_events (bot_id, user_id, event_type, message)
-    values (%s, %s, %s, %s)
-    """
     try:
-        with conn() as c:
-            with c.cursor() as cur:
-                cur.execute(q, (bot_id, user_id, event_type, message))
-                c.commit()
+        sb = supabase_client()
+        sb.table("bot_events").insert({
+            "bot_id": bot_id,
+            "user_id": user_id,
+            "event_type": event_type,
+            "message": message,
+        }).execute()
     except Exception:
         pass
 
 def upsert_state(bot_id: str, user_id: str, state: Dict[str, Any]):
-    q = """
-    insert into public.bot_state (
-      bot_id, user_id,
-      in_position, direction, entry_price, entry_time, qty, base_notional,
-      peak_price, low_price, added_levels, week_trade_counts,
-      last_exit_time, last_candle_time,
-      cumulative_pnl, max_unrealized_pnl, min_unrealized_pnl,
-      updated_at
-    ) values (
-      %s, %s,
-      %s, %s, %s, %s, %s, %s,
-      %s, %s, %s, %s::jsonb,
-      %s, %s,
-      %s, %s, %s,
-      now()
-    )
-    on conflict (bot_id) do update set
-      in_position = excluded.in_position,
-      direction = excluded.direction,
-      entry_price = excluded.entry_price,
-      entry_time = excluded.entry_time,
-      qty = excluded.qty,
-      base_notional = excluded.base_notional,
-      peak_price = excluded.peak_price,
-      low_price = excluded.low_price,
-      added_levels = excluded.added_levels,
-      week_trade_counts = excluded.week_trade_counts,
-      last_exit_time = excluded.last_exit_time,
-      last_candle_time = excluded.last_candle_time,
-      cumulative_pnl = excluded.cumulative_pnl,
-      max_unrealized_pnl = excluded.max_unrealized_pnl,
-      min_unrealized_pnl = excluded.min_unrealized_pnl,
-      updated_at = now()
-    """
-    with conn() as c:
-        with c.cursor() as cur:
-            cur.execute(q, (
-                bot_id, user_id,
-                bool(state.get("in_position", False)),
-                state.get("direction") or None,
-                state.get("entry_price"),
-                state.get("entry_time"),
-                state.get("qty"),
-                state.get("base_notional"),
-                state.get("peak_price"),
-                state.get("low_price"),
-                int(state.get("added_levels", 0)),
-                json.dumps(state.get("week_trade_counts", {}) or {}),
-                state.get("last_exit_time"),
-                state.get("last_candle_time"),
-                float(state.get("cumulative_pnl", 0.0)),
-                float(state.get("max_unrealized_pnl", 0.0)),
-                float(state.get("min_unrealized_pnl", 0.0)),
-            ))
-            c.commit()
+    sb = supabase_client()
+    payload = {
+        "bot_id": bot_id,
+        "user_id": user_id,
+        "in_position": bool(state.get("in_position", False)),
+        "direction": state.get("direction") or None,
+        "entry_price": state.get("entry_price"),
+        "entry_time": state.get("entry_time"),
+        "qty": state.get("qty"),
+        "base_notional": state.get("base_notional"),
+        "peak_price": state.get("peak_price"),
+        "low_price": state.get("low_price"),
+        "added_levels": int(state.get("added_levels", 0)),
+        "week_trade_counts": state.get("week_trade_counts", {}) or {},
+        "last_exit_time": state.get("last_exit_time"),
+        "last_candle_time": state.get("last_candle_time"),
+        "cumulative_pnl": float(state.get("cumulative_pnl", 0.0)),
+        "max_unrealized_pnl": float(state.get("max_unrealized_pnl", 0.0)),
+        "min_unrealized_pnl": float(state.get("min_unrealized_pnl", 0.0)),
+        # updated_at handled by DB default/trigger if present
+    }
+    sb.table("bot_state").upsert(payload, on_conflict="bot_id").execute()
 
 def insert_position_open(bot_id: str, user_id: str, direction: str, entry_price: float, entry_time: str, qty: float) -> str:
-    q = """
-    insert into public.bot_positions (bot_id, user_id, direction, entry_price, entry_time, qty, status)
-    values (%s, %s, %s, %s, %s::timestamptz, %s, 'open')
-    returning id
-    """
-    with conn() as c:
-        with c.cursor() as cur:
-            cur.execute(q, (bot_id, user_id, direction, entry_price, entry_time, qty))
-            pid = cur.fetchone()[0]
-            c.commit()
-            return str(pid)
+    sb = supabase_client()
+    resp = sb.table("bot_positions").insert({
+        "bot_id": bot_id,
+        "user_id": user_id,
+        "direction": direction,
+        "entry_price": entry_price,
+        "entry_time": entry_time,
+        "qty": qty,
+        "status": "open",
+    }).execute()
+    data = _ensure_data(resp, "insert_position_open")
+    return str(data[0]["id"])
 
 def close_position(position_id: str, exit_price: float, exit_time: str, realized_pnl: float):
-    q = """
-    update public.bot_positions
-    set exit_price = %s,
-        exit_time = %s::timestamptz,
-        realized_pnl = %s,
-        status = 'closed'
-    where id = %s
-    """
-    with conn() as c:
-        with c.cursor() as cur:
-            cur.execute(q, (exit_price, exit_time, realized_pnl, position_id))
-            c.commit()
+    sb = supabase_client()
+    sb.table("bot_positions").update({
+        "exit_price": exit_price,
+        "exit_time": exit_time,
+        "realized_pnl": realized_pnl,
+        "status": "closed",
+    }).eq("id", position_id).execute()
 
 def insert_trade(
     bot_id: str,
@@ -146,22 +102,16 @@ def insert_trade(
     exchange_order_id: str | None,
     executed_at: str,
 ):
-    q = """
-    insert into public.bot_trades (
-      bot_id, user_id, position_id,
-      side, price, qty, fee, pnl, exchange_order_id,
-      executed_at
-    ) values (
-      %s, %s, %s,
-      %s, %s, %s, %s, %s, %s,
-      %s::timestamptz
-    )
-    """
-    with conn() as c:
-        with c.cursor() as cur:
-            cur.execute(q, (
-                bot_id, user_id, position_id,
-                side, price, qty, fee, pnl, exchange_order_id,
-                executed_at
-            ))
-            c.commit()
+    sb = supabase_client()
+    sb.table("bot_trades").insert({
+        "bot_id": bot_id,
+        "user_id": user_id,
+        "position_id": position_id,
+        "side": side,
+        "price": price,
+        "qty": qty,
+        "fee": fee,
+        "pnl": pnl,
+        "exchange_order_id": exchange_order_id,
+        "executed_at": executed_at,
+    }).execute()

@@ -13,10 +13,6 @@ on:
         description: "Fly region"
         required: false
         default: "ams"
-      secrets_json:
-        description: "JSON object of secrets to set on Fly app"
-        required: false
-        default: "{}"
       command:
         required: true
         type: string
@@ -44,20 +40,32 @@ jobs:
           flyctl status --app "${{ inputs.fly_app }}" || flyctl apps create "${{ inputs.fly_app }}"
 
       - name: Set Fly secrets
-        if: ${{ inputs.secrets_json != '{}' }}
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          BOT_ID: ${{ inputs.bot_id }}
+          BOT_ENC_KEY: ${{ secrets.BOT_ENC_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          NEW_RELIC_LICENSE_KEY: ${{ secrets.NEW_RELIC_LICENSE_KEY }}
         run: |
-          echo '${{ inputs.secrets_json }}' > secrets.json
           python - <<'PY'
-          import json, subprocess
-          d=json.load(open("secrets.json"))
-          if not isinstance(d, dict):
-              raise SystemExit("secrets_json must be a JSON object")
-          args=["flyctl","secrets","set"]
-          for k,v in d.items():
-              args.append(f"{k}={v}")
-          args += ["--app","${{ inputs.fly_app }}"]
+          import os, subprocess
+
+          base_required = ["BOT_ID", "BOT_ENC_KEY", "SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"]
+          optional = ["NEW_RELIC_LICENSE_KEY"]
+
+          missing_base = [k for k in base_required if not os.getenv(k)]
+          if missing_base:
+              raise SystemExit(f"Missing required secrets: {', '.join(missing_base)}")
+
+          args = ["flyctl", "secrets", "set"]
+
+          for k in base_required + optional:
+              v = os.getenv(k)
+              if v:
+                  args.append(f"{k}={v}")
+
+          args += ["--app", "${{ inputs.fly_app }}"]
           subprocess.check_call(args)
           PY
 
