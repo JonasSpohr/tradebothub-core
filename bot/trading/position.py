@@ -48,6 +48,33 @@ def manage_open_position(ctx, strategy):
     unreal = (price - STATE.entry_price) * STATE.qty * (1 if STATE.direction == "long" else -1)
     STATE.max_unrealized_pnl = max(STATE.max_unrealized_pnl, unreal)
     STATE.min_unrealized_pnl = min(STATE.min_unrealized_pnl, unreal)
+    STATE.last_price = price
+    STATE.unrealized_pnl = unreal
+    STATE.atr = atr
+
+    sl_mult = float(ctx.strategy_config.get("sl_atr_mult", 1.5))
+    tp_mult = float(ctx.strategy_config.get("tp_atr_mult", 3.5))
+    trail_mult = float(ctx.strategy_config.get("trail_atr_mult", 1.5))
+    trail_start_r = float(ctx.strategy_config.get("trail_start_r", 1.0))
+
+    if STATE.direction == "long":
+        sl = sl_mult * atr
+        tp = tp_mult * atr
+        STATE.stop_price = STATE.entry_price - sl
+        STATE.take_profit_price = STATE.entry_price + tp
+        STATE.peak_price = max(STATE.peak_price, price)
+        STATE.trailing_active = unreal >= trail_start_r * sl
+        if STATE.trailing_active:
+            STATE.trailing_stop_price = STATE.peak_price - trail_mult * atr
+    elif STATE.direction == "short":
+        sl = sl_mult * atr
+        tp = tp_mult * atr
+        STATE.stop_price = STATE.entry_price + sl
+        STATE.take_profit_price = STATE.entry_price - tp
+        STATE.low_price = min(STATE.low_price, price)
+        STATE.trailing_active = unreal >= trail_start_r * sl
+        if STATE.trailing_active:
+            STATE.trailing_stop_price = STATE.low_price + trail_mult * atr
 
     reason = atr_exit_reason(STATE, price, atr, ctx.strategy_config)
     if reason:
@@ -76,7 +103,7 @@ def manage_open_position(ctx, strategy):
             cumulative_pnl=keep_pnl,
             last_exit_time=keep_exit,
         )
-
+        STATE.last_manage_time = exit_time
         upsert_state(ctx.id, ctx.user_id, STATE.to_dict())
         return
 
@@ -112,6 +139,7 @@ def try_open_position(ctx, strategy):
     df = strategy.prepare(df, ctx.strategy_config)
 
     if len(df) < int(ctx.strategy_config.get("min_bars", 500)):
+        log(f"[entry] skip: not enough bars ({len(df)} < {int(ctx.strategy_config.get('min_bars', 500))})", level="DEBUG")
         return
 
     last_ts = df.index[-1]
@@ -119,19 +147,27 @@ def try_open_position(ctx, strategy):
     row = df.iloc[-1]
 
     if STATE.last_candle_time == last_iso:
+        log(f"[entry] skip: already processed candle {last_iso}", level="DEBUG")
         return
     STATE.last_candle_time = last_iso
+    candle_updated = True
 
     iso = last_ts.isocalendar()
     week_key = f"{iso.year}-{iso.week}"
     STATE.week_trade_counts.setdefault(week_key, 0)
 
     if STATE.week_trade_counts[week_key] >= int(ctx.risk_config["max_trades_per_week"]):
+        if candle_updated:
+            upsert_state(ctx.id, ctx.user_id, STATE.to_dict())
+        log(f"[entry] skip: max trades reached for week {week_key}", level="DEBUG")
         return
 
     long_ok = strategy.long_signal(row, ctx.strategy_config)
     short_ok = strategy.short_signal(row, ctx.strategy_config)
     if not long_ok and not short_ok:
+        if candle_updated:
+            upsert_state(ctx.id, ctx.user_id, STATE.to_dict())
+        log(f"[entry] skip: no signal (long_ok={long_ok} short_ok={short_ok}) close={row.get('close')}", level="DEBUG")
         return
 
     expected_price = float(row["close"])
@@ -140,6 +176,9 @@ def try_open_position(ctx, strategy):
     bal = fetch_quote_balance(ex, symbol)
     notional = compute_notional(bal, float(ctx.risk_config["allocation_frac"]), float(ctx.risk_config["leverage"]))
     if notional < float(ctx.risk_config["min_notional_usd"]):
+        if candle_updated:
+            upsert_state(ctx.id, ctx.user_id, STATE.to_dict())
+        log(f"[entry] skip: notional too small ({notional:.2f} < {float(ctx.risk_config['min_notional_usd'])})", level="DEBUG")
         return
 
     qty = compute_qty(notional, price)
@@ -168,4 +207,5 @@ def try_open_position(ctx, strategy):
     STATE.min_unrealized_pnl = 0.0
 
     event(ctx, "trade", f"ENTRY {STATE.direction} price={price:.6f} qty={qty:.6f} notional={notional:.2f}")
+    STATE.last_manage_time = utcnow_iso()
     upsert_state(ctx.id, ctx.user_id, STATE.to_dict())

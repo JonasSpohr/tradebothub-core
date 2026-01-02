@@ -4,5 +4,5 @@ numpy==2.0.1
 supabase==2.4.1
 cryptography==43.0.1
 requests==2.32.3
-# optional:
-# newrelic==9.12.0
+# Monitoring (optional: leave env NEW_RELIC_LICENSE_KEY unset to skip)
+newrelic==9.12.0

@@ -1,4 +1,5 @@
 import os, json
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 from supabase import Client, create_client
 
@@ -50,6 +51,48 @@ def notify(
     except Exception:
         pass
 
+def set_bot_status(bot_id: str, status: str):
+    """
+    Update bot status field on bots table. Best-effort to avoid interrupting runtime.
+    """
+    try:
+        sb = supabase_client()
+        sb.table("bots").update({"status": status}).eq("id", bot_id).execute()
+    except Exception:
+        pass
+
+def refresh_controls(bot_id: str) -> Dict[str, Any]:
+    """
+    Fetch lightweight control + subscription data to allow runtime toggles.
+    """
+    sb = supabase_client()
+    resp = sb.table("bot_context_view").select("control_config,subscription_status,execution_config").eq("id", bot_id).single().execute()
+    return _ensure_data(resp, "refresh_controls")
+
+def touch_heartbeat(bot_id: str, user_id: str):
+    """
+    Update heartbeat timestamp on bot_state (preferred) or latest heartbeat event.
+    """
+    try:
+        sb = supabase_client()
+        iso = datetime.now(timezone.utc).isoformat()
+        sb.table("bot_state").update({"heartbeat_at": iso, "updated_at": iso}).eq("bot_id", bot_id).execute()
+        try:
+            resp = sb.table("bot_events")\
+                .select("id")\
+                .eq("bot_id", bot_id)\
+                .eq("event_type", "heartbeat")\
+                .order("created_at", desc=True)\
+                .limit(1)\
+                .execute()
+            data = resp.data or []
+            if data:
+                sb.table("bot_events").update({"message": iso}).eq("id", data[0]["id"]).execute()
+        except Exception:
+            pass
+    except Exception:
+        pass
+
 def fetch_bot_context_row(bot_id: str) -> Dict[str, Any]:
     sb = supabase_client()
     # Expect a view named bot_context_view that returns the joined bot context (see deploy SQL).
@@ -73,24 +116,39 @@ def write_event(bot_id: str, user_id: str, event_type: str, message: str):
 
 def upsert_state(bot_id: str, user_id: str, state: Dict[str, Any]):
     sb = supabase_client()
+    def _none_if_empty(val):
+        return None if (val is None or val == "") else val
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    heartbeat = _none_if_empty(state.get("heartbeat_at")) or now_iso
+
     payload = {
         "bot_id": bot_id,
         "user_id": user_id,
         "in_position": bool(state.get("in_position", False)),
-        "direction": state.get("direction") or None,
+        "direction": _none_if_empty(state.get("direction")),
         "entry_price": state.get("entry_price"),
-        "entry_time": state.get("entry_time"),
+        "entry_time": _none_if_empty(state.get("entry_time")),
         "qty": state.get("qty"),
         "base_notional": state.get("base_notional"),
         "peak_price": state.get("peak_price"),
         "low_price": state.get("low_price"),
         "added_levels": int(state.get("added_levels", 0)),
         "week_trade_counts": state.get("week_trade_counts", {}) or {},
-        "last_exit_time": state.get("last_exit_time"),
-        "last_candle_time": state.get("last_candle_time"),
+        "last_exit_time": _none_if_empty(state.get("last_exit_time")),
+        "last_candle_time": _none_if_empty(state.get("last_candle_time")),
         "cumulative_pnl": float(state.get("cumulative_pnl", 0.0)),
         "max_unrealized_pnl": float(state.get("max_unrealized_pnl", 0.0)),
         "min_unrealized_pnl": float(state.get("min_unrealized_pnl", 0.0)),
+        "last_price": state.get("last_price"),
+        "unrealized_pnl": float(state.get("unrealized_pnl", 0.0)),
+        "stop_price": state.get("stop_price"),
+        "take_profit_price": state.get("take_profit_price"),
+        "trailing_stop_price": state.get("trailing_stop_price"),
+        "trailing_active": bool(state.get("trailing_active", False)),
+        "atr": state.get("atr"),
+        "last_manage_time": _none_if_empty(state.get("last_manage_time")),
+        "heartbeat_at": heartbeat,
         # updated_at handled by DB default/trigger if present
     }
     sb.table("bot_state").upsert(payload, on_conflict="bot_id").execute()

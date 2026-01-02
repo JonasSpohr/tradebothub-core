@@ -19,6 +19,15 @@ class PositionState:
     cumulative_pnl: float = 0.0
     max_unrealized_pnl: float = 0.0
     min_unrealized_pnl: float = 0.0
+    last_price: float = 0.0
+    unrealized_pnl: float = 0.0
+    stop_price: float = 0.0
+    take_profit_price: float = 0.0
+    trailing_stop_price: float = 0.0
+    trailing_active: bool = False
+    atr: float = 0.0
+    last_manage_time: str = ""
+    heartbeat_at: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
