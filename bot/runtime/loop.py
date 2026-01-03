@@ -8,6 +8,7 @@ from bot.core.types import BotContext
 from bot.strategies import get_strategy
 from bot.trading.position import manage_open_position, try_open_position, STATE as POSITION_STATE, _exchange
 from bot.infra.monitoring import ping_healthchecks
+from bot.infra.healthcheck import ping_healthcheck, fail_healthcheck
 from bot.infra.exchange import fetch_ohlcv_df
 
 CONTROL_REFRESH_SECONDS = 60
@@ -60,11 +61,11 @@ def run_loop(ctx: BotContext):
         level="INFO",
     )
 
+    last_state = None
     while True:
         now = time.monotonic()
         try:
             tick += 1
-            log(f"[poll] tick={tick} state={state.value} start", level="DEBUG")
 
             # periodic control refresh
             if now - last_control_refresh >= CONTROL_REFRESH_SECONDS:
@@ -109,8 +110,8 @@ def run_loop(ctx: BotContext):
                         state = BotState.FLAT if ready else BotState.WARMUP
                     if not ready and not warmup_emitted:
                         write_event(ctx.id, ctx.user_id, "warmup", f"min_bars={min_bars}")
-                        log("[warmup] waiting for enough bars", level="INFO")
-                        warmup_emitted = True
+                    log("[warmup] waiting for enough bars", level="INFO")
+                    warmup_emitted = True
                 touch_heartbeat(ctx.id, ctx.user_id)
             elif state == BotState.WARMUP:
                 if pause_reason:
@@ -129,14 +130,17 @@ def run_loop(ctx: BotContext):
                     log("[pause] exiting paused", level="INFO")
                 else:
                     if POSITION_STATE.in_position:
+                        log("[paused] managing open position only (no new entries)", level="INFO")
                         manage_open_position(ctx, strategy)
                 touch_heartbeat(ctx.id, ctx.user_id)
             elif state == BotState.FLAT:
+                log("[state] FLAT: evaluating entries on new candles only", level="DEBUG")
                 try_open_position(ctx, strategy)
                 touch_heartbeat(ctx.id, ctx.user_id)
                 if POSITION_STATE.in_position:
                     state = BotState.IN_POSITION
             elif state == BotState.IN_POSITION:
+                log("[state] IN_POSITION: managing open position and exits", level="DEBUG")
                 manage_open_position(ctx, strategy)
                 touch_heartbeat(ctx.id, ctx.user_id)
                 if not POSITION_STATE.in_position:
@@ -146,8 +150,14 @@ def run_loop(ctx: BotContext):
 
             # healthcheck ping
             ping_healthchecks()
+            # healthchecks.io ping
+            ping_healthcheck(getattr(ctx, "_hc_ping_url", None))
 
             consec_errors = 0
+
+            if state != last_state:
+                log(f"[state] transition {last_state.value if last_state else 'none'} -> {state.value}", level="INFO")
+                last_state = state
 
             # keep steady cadence: schedule next tick and sleep remaining time if positive
             next_tick += poll
@@ -170,6 +180,19 @@ def run_loop(ctx: BotContext):
                     body="Too many consecutive errors",
                     severity="critical",
                 )
+                try:
+                    from bot.infra.db import notify_support
+                    notify_support(
+                        ctx.user_id,
+                        ctx.id,
+                        title="Bot stopped after consecutive errors",
+                        body=str(e),
+                        severity="critical",
+                    )
+                except Exception:
+                    pass
+                # Signal healthcheck failure
+                fail_healthcheck(getattr(ctx, "_hc_ping_url", None))
                 log("Too many consecutive errors; exiting.", level="ERROR")
                 return
 

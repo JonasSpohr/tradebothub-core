@@ -51,6 +51,33 @@ def notify(
     except Exception:
         pass
 
+def notify_support(
+    user_id: str,
+    bot_id: Optional[str],
+    title: str,
+    body: Optional[str] = None,
+    severity: str = "critical",
+    target_email: Optional[str] = None,
+):
+    """
+    Send an email-channel notification to support. target_email can override default.
+    """
+    try:
+        sb = supabase_client()
+        email = target_email or os.getenv("SUPPORT_EMAIL") or "botneedsattention@tradebothub.pro"
+        sb.table("notifications").insert({
+            "user_id": user_id,
+            "bot_id": bot_id,
+            "channel": "email",
+            "type": "support_alert",
+            "severity": severity,
+            "title": title,
+            "body": body,
+            "metadata": {"target_email": email},
+        }).execute()
+    except Exception:
+        pass
+
 def set_bot_status(bot_id: str, status: str):
     """
     Update bot status field on bots table. Best-effort to avoid interrupting runtime.

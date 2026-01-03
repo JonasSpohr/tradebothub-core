@@ -1,11 +1,12 @@
 from bot.core.types import BotContext
 from bot.core.config import normalize_configs
-from bot.infra.db import fetch_bot_context_row, write_event, notify, upsert_state, set_bot_status
+from bot.infra.db import fetch_bot_context_row, write_event, notify, upsert_state, set_bot_status, notify_support
 from bot.core.logging import log, set_log_context
 from bot.state import PositionState
 from bot.infra.crypto import decrypt
 from bot.infra.exchange import create_exchange, fetch_ohlcv_df, fetch_last_price
 from bot.infra.monitoring import record_exception
+from bot.infra.healthcheck import ensure_healthcheck
 
 def load_context(bot_id: str) -> BotContext:
     row = fetch_bot_context_row(bot_id)
@@ -78,6 +79,9 @@ def start(bot_id: str):
         _assert_connectivity(ctx)
         log("Connectivity verified; entering main loop")
 
+        # Ensure healthcheck exists and stash ping URL on context
+        ctx._hc_ping_url = ensure_healthcheck(ctx.id, f"bot-{ctx.name}", int(ctx.execution_config["poll_interval"]))
+
         write_event(ctx.id, ctx.user_id, "started", f"strategy={ctx.strategy} tf={ctx.execution_config['timeframe']}")
         write_event(ctx.id, ctx.user_id, "status", "running")
         set_bot_status(ctx.id, "running")
@@ -108,6 +112,18 @@ def start(bot_id: str):
                 body=str(e),
                 severity="critical",
             )
+            notify_support(
+                getattr(ctx, "user_id", None) or "",
+                bot_id,
+                title="Bot startup failed",
+                body=f"{msg} :: {e}",
+                severity="critical",
+            )
+            try:
+                from bot.infra.healthcheck import fail_healthcheck
+                fail_healthcheck(getattr(ctx, "_hc_ping_url", None), str(e))
+            except Exception:
+                pass
         except Exception:
             pass
         return

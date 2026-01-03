@@ -4,20 +4,13 @@ from bot.core.logging import log
 from bot.core.logging import attach_newrelic_handler
 
 def _write_newrelic_config(path: str, app_name: str, license_key: str):
-    cfg = f"""
-common:
-  license_key: {license_key}
-  app_name: {app_name}
-  distributed_tracing:
-    enabled: true
-  application_logging:
-    enabled: true
-    forwarding:
-      enabled: true
-      log_level: info
-  logging:
-    enabled: true
-    level: info
+    cfg = f"""[newrelic]
+license_key = {license_key}
+app_name = {app_name}
+distributed_tracing.enabled = true
+application_logging.enabled = true
+application_logging.forwarding.enabled = true
+application_logging.forwarding.log_level = info
 """
     with open(path, "w", encoding="utf-8") as f:
         f.write(cfg)
