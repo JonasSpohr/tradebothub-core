@@ -41,8 +41,8 @@ def _create_healthcheck(bot_id: str, name: str, timeout_seconds: int, grace_seco
     # Prefer explicit support email if provided; include in desc for visibility.
     support_email = os.getenv("SUPPORT_EMAIL") or "botneedsattention@tradebot.hub"
     payload = {
-        "name": name,
-        "tags": f"bot {bot_id}",
+        "name": f"b-{bot_id}",
+        "tags": f"bot {bot_id} tradebothub",
         "timeout": timeout_seconds,
         "grace": grace_seconds,
         "channels": channels,
