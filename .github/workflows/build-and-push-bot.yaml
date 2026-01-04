@@ -1,0 +1,55 @@
+name: Build and Push Bot Image
+
+on:
+  workflow_dispatch:
+    inputs:
+      version_tag:
+        description: "Image tag (default: sha)"
+        required: false
+        default: ""
+  push:
+    branches: [main]
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write   # needed for GHCR
+    env:
+      REGISTRY: ghcr.io
+      IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/tradebothub-bot
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute tags
+        id: tags
+        run: |
+          SHA_TAG=${GITHUB_SHA::7}
+          INPUT_TAG="${{ github.event.inputs.version_tag }}"
+          if [ -z "$INPUT_TAG" ]; then
+            INPUT_TAG="$SHA_TAG"
+          fi
+          echo "sha_tag=$SHA_TAG" >> $GITHUB_OUTPUT
+          echo "version_tag=$INPUT_TAG" >> $GITHUB_OUTPUT
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ steps.tags.outputs.version_tag }}
+            ${{ env.IMAGE_NAME }}:${{ steps.tags.outputs.sha_tag }}
+            ${{ env.IMAGE_NAME }}:latest
