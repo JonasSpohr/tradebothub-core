@@ -2,7 +2,7 @@ import time
 from enum import Enum
 from typing import Optional
 from bot.core.logging import log
-from bot.core.safety import MAX_CONSECUTIVE_ERRORS, ERROR_BACKOFF_SECONDS, MIN_POLL_SECONDS
+from bot.core.safety import MAX_CONSECUTIVE_ERRORS, ERROR_BACKOFF_SECONDS, MIN_POLL_SECONDS, MAX_LEVERAGE, MAX_ALLOCATION_FRAC
 from bot.infra.db import write_event, notify, touch_heartbeat, refresh_controls
 from bot.core.types import BotContext
 from bot.strategies import get_strategy
@@ -14,12 +14,12 @@ from bot.infra.exchange import fetch_ohlcv_df
 CONTROL_REFRESH_SECONDS = 60
 
 class BotState(Enum):
-    BOOTSTRAP = "bootstrap"
-    WARMUP = "warmup"
-    PAUSED = "paused"
-    FLAT = "flat"
+    INIT = "init"
+    IDLE = "idle"
+    WAITING_FOR_ENTRY = "waiting_for_entry"
     IN_POSITION = "in_position"
-    ERROR = "error"
+    COOLDOWN = "cooldown"
+    HALT = "halt"
 
 def _pause_reason(ctx: BotContext) -> Optional[str]:
     cc = ctx.control_config or {}
@@ -47,13 +47,22 @@ def _has_min_bars(ctx: BotContext, strategy) -> bool:
 def run_loop(ctx: BotContext):
     strategy = get_strategy(ctx.strategy)
     poll = max(MIN_POLL_SECONDS, int(ctx.execution_config["poll_interval"]))
+    # Clamps for safety
+    if int(ctx.execution_config.get("lookback_bars", 0)) > 2000:
+        ctx.execution_config["lookback_bars"] = 2000
+        write_event(ctx.id, ctx.user_id, "config_clamped", "lookback_bars clamped to 2000")
+    if float(ctx.risk_config.get("leverage", 0)) > MAX_LEVERAGE:
+        ctx.risk_config["leverage"] = MAX_LEVERAGE
+        write_event(ctx.id, ctx.user_id, "config_clamped", f"leverage clamped to {MAX_LEVERAGE}")
+    if float(ctx.risk_config.get("allocation_frac", 0)) > MAX_ALLOCATION_FRAC:
+        ctx.risk_config["allocation_frac"] = MAX_ALLOCATION_FRAC
+        write_event(ctx.id, ctx.user_id, "config_clamped", f"allocation_frac clamped to {MAX_ALLOCATION_FRAC}")
+
     consec_errors = 0
     tick = 0
-    state = BotState.BOOTSTRAP
-    next_retry = None
+    state = BotState.INIT
     next_tick = time.monotonic()
     last_control_refresh = 0.0
-    warmup_emitted = False
     paused_reason = None
 
     log(
@@ -79,62 +88,33 @@ def run_loop(ctx: BotContext):
 
             pause_reason = _pause_reason(ctx)
 
-            if state == BotState.ERROR:
-                if next_retry is None or now >= next_retry:
-                    log("[error] retrying bootstrap", level="WARN")
-                    state = BotState.BOOTSTRAP
-                    consec_errors = 0
-                else:
-                    time.sleep(ERROR_BACKOFF_SECONDS)
-                    continue
+            if state == BotState.HALT:
+                log("[halt] halting loop", level="ERROR")
+                return
 
-            if pause_reason and state not in (BotState.BOOTSTRAP, BotState.ERROR):
-                if state != BotState.PAUSED:
-                    paused_reason = pause_reason
-                    write_event(ctx.id, ctx.user_id, "paused", pause_reason)
-                    notify(ctx.user_id, ctx.id, "paused", "Bot paused", body=pause_reason, severity="warning")
-                    log(f"[pause] entering paused due to {pause_reason}", level="WARN")
-                state = BotState.PAUSED
+            if pause_reason or not ctx.control_config.get("trading_enabled", False):
+                if state != BotState.IDLE:
+                    paused_reason = pause_reason or "trading_disabled"
+                    write_event(ctx.id, ctx.user_id, "paused", paused_reason)
+                    log(f"[pause] entering idle due to {paused_reason}", level="WARN")
+                state = BotState.IDLE
 
-            if state == BotState.BOOTSTRAP:
+            if state == BotState.INIT:
                 write_event(ctx.id, ctx.user_id, "started", f"strategy={ctx.strategy} tf={ctx.execution_config['timeframe']}")
-                pause_reason = _pause_reason(ctx)
-                if pause_reason:
-                    state = BotState.PAUSED
+                if pause_reason or not ctx.control_config.get("trading_enabled", False):
+                    state = BotState.IDLE
                 else:
-                    min_bars = int(ctx.strategy_config.get("min_bars", 500))
-                    ready = _has_min_bars(ctx, strategy)
-                    if POSITION_STATE.in_position:
-                        state = BotState.IN_POSITION
-                    else:
-                        state = BotState.FLAT if ready else BotState.WARMUP
-                    if not ready and not warmup_emitted:
-                        write_event(ctx.id, ctx.user_id, "warmup", f"min_bars={min_bars}")
-                    log("[warmup] waiting for enough bars", level="INFO")
-                    warmup_emitted = True
+                    state = BotState.IN_POSITION if POSITION_STATE.in_position else BotState.WAITING_FOR_ENTRY
                 touch_heartbeat(ctx.id, ctx.user_id)
-            elif state == BotState.WARMUP:
-                if pause_reason:
-                    state = BotState.PAUSED
-                else:
-                    ready = _has_min_bars(ctx, strategy)
-                    if ready:
-                        state = BotState.IN_POSITION if POSITION_STATE.in_position else BotState.FLAT
-                        log("[warmup] complete; moving on", level="INFO")
+            elif state == BotState.IDLE:
+                if POSITION_STATE.in_position:
+                    log("[idle] managing open position only", level="INFO")
+                    manage_open_position(ctx, strategy)
                 touch_heartbeat(ctx.id, ctx.user_id)
-            elif state == BotState.PAUSED:
-                if not pause_reason:
-                    write_event(ctx.id, ctx.user_id, "resumed", paused_reason or "controls_ok")
-                    notify(ctx.user_id, ctx.id, "resumed", "Bot resumed", severity="info")
-                    state = BotState.IN_POSITION if POSITION_STATE.in_position else BotState.FLAT
-                    log("[pause] exiting paused", level="INFO")
-                else:
-                    if POSITION_STATE.in_position:
-                        log("[paused] managing open position only (no new entries)", level="INFO")
-                        manage_open_position(ctx, strategy)
-                touch_heartbeat(ctx.id, ctx.user_id)
-            elif state == BotState.FLAT:
-                log("[state] FLAT: evaluating entries on new candles only", level="DEBUG")
+                if not pause_reason and ctx.control_config.get("trading_enabled", False):
+                    state = BotState.IN_POSITION if POSITION_STATE.in_position else BotState.WAITING_FOR_ENTRY
+            elif state == BotState.WAITING_FOR_ENTRY:
+                log("[state] WAITING_FOR_ENTRY: evaluating entries on new candles only", level="DEBUG")
                 try_open_position(ctx, strategy)
                 touch_heartbeat(ctx.id, ctx.user_id)
                 if POSITION_STATE.in_position:
@@ -144,7 +124,11 @@ def run_loop(ctx: BotContext):
                 manage_open_position(ctx, strategy)
                 touch_heartbeat(ctx.id, ctx.user_id)
                 if not POSITION_STATE.in_position:
-                    state = BotState.FLAT
+                    state = BotState.COOLDOWN
+            elif state == BotState.COOLDOWN:
+                log("[state] COOLDOWN: waiting one tick before re-entry", level="DEBUG")
+                touch_heartbeat(ctx.id, ctx.user_id)
+                state = BotState.WAITING_FOR_ENTRY
             else:
                 touch_heartbeat(ctx.id, ctx.user_id)
 
@@ -180,21 +164,9 @@ def run_loop(ctx: BotContext):
                     body="Too many consecutive errors",
                     severity="critical",
                 )
-                try:
-                    from bot.infra.db import notify_support
-                    notify_support(
-                        ctx.user_id,
-                        ctx.id,
-                        title="Bot stopped after consecutive errors",
-                        body=str(e),
-                        severity="critical",
-                    )
-                except Exception:
-                    pass
                 # Signal healthcheck failure
                 fail_healthcheck(getattr(ctx, "_hc_ping_url", None))
                 log("Too many consecutive errors; exiting.", level="ERROR")
                 return
 
-            state = BotState.ERROR
-            next_retry = time.monotonic() + ERROR_BACKOFF_SECONDS
+            state = BotState.HALT

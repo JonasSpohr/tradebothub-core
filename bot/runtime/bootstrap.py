@@ -1,6 +1,6 @@
 from bot.core.types import BotContext
 from bot.core.config import normalize_configs
-from bot.infra.db import fetch_bot_context_row, write_event, notify, upsert_state, set_bot_status, notify_support
+from bot.infra.db import fetch_bot_context_row, write_event, notify, upsert_state, set_bot_status
 from bot.core.logging import log, set_log_context
 from bot.state import PositionState
 from bot.infra.crypto import decrypt
@@ -61,9 +61,14 @@ def start(bot_id: str):
         write_event(ctx.id, ctx.user_id, "status", "starting")
         set_bot_status(ctx.id, "starting")
 
+        # Subscription / kill / trading checks
+        if ctx.subscription_status != "active":
+            write_event(ctx.id, ctx.user_id, "inactive_subscription_exit", "Subscription not active")
+            log("Subscription inactive; exiting.", level="WARN")
+            return
         ok, reason = startup_gate(ctx)
         if not ok:
-            write_event(ctx.id, ctx.user_id, "stopped", f"Startup blocked: {reason}")
+            write_event(ctx.id, ctx.user_id, "kill_switch_exit", f"Startup blocked: {reason}")
             notify(
                 ctx.user_id,
                 ctx.id,
@@ -85,14 +90,6 @@ def start(bot_id: str):
         write_event(ctx.id, ctx.user_id, "started", f"strategy={ctx.strategy} tf={ctx.execution_config['timeframe']}")
         write_event(ctx.id, ctx.user_id, "status", "running")
         set_bot_status(ctx.id, "running")
-        notify(
-            ctx.user_id,
-            ctx.id,
-            "bot_started",
-            "Bot started",
-            body=f"strategy={ctx.strategy} tf={ctx.execution_config['timeframe']}",
-            severity="info",
-        )
         log("Entering main loop")
         run_loop(ctx)
     except Exception as e:
@@ -110,13 +107,6 @@ def start(bot_id: str):
                 "startup_failed",
                 "Bot failed to start",
                 body=str(e),
-                severity="critical",
-            )
-            notify_support(
-                getattr(ctx, "user_id", None) or "",
-                bot_id,
-                title="Bot startup failed",
-                body=f"{msg} :: {e}",
                 severity="critical",
             )
             try:
