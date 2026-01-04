@@ -1,14 +1,14 @@
 name: Build and Push Bot Image
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       version_tag:
-        description: "Image tag (default: sha)"
+        description: "Optional image tag (defaults to short SHA)"
         required: false
         default: ""
-  push:
-    branches: [main]
 
 jobs:
   build-and-push:
@@ -18,7 +18,7 @@ jobs:
       packages: write   # needed for GHCR
     env:
       REGISTRY: ghcr.io
-      IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/tradebothub-bot
+      IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/tradebothub-core
     steps:
       - name: Checkout
         uses: actions/checkout@v4

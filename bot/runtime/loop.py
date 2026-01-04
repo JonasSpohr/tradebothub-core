@@ -10,6 +10,8 @@ from bot.trading.position import manage_open_position, try_open_position, STATE 
 from bot.infra.monitoring import ping_healthchecks
 from bot.infra.healthcheck import ping_healthcheck, fail_healthcheck
 from bot.infra.exchange import fetch_ohlcv_df
+from bot.runtime.scheduler import JitterScheduler
+from bot.core.config import normalize_configs
 
 CONTROL_REFRESH_SECONDS = 60
 
@@ -44,9 +46,18 @@ def _has_min_bars(ctx: BotContext, strategy) -> bool:
         log(f"[warmup] failed to fetch bars: {e}", level="WARN")
         return False
 
+def _get_poll_seconds(ctx: BotContext) -> int:
+    # pull from execution_config.poll_interval
+    raw = ctx.execution_config.get("poll_interval", 300)
+    try:
+        val = int(raw)
+    except Exception:
+        val = 300
+    return max(val, MIN_POLL_SECONDS)
+
 def run_loop(ctx: BotContext):
     strategy = get_strategy(ctx.strategy)
-    poll = max(MIN_POLL_SECONDS, int(ctx.execution_config["poll_interval"]))
+    poll = _get_poll_seconds(ctx)
     # Clamps for safety
     if int(ctx.execution_config.get("lookback_bars", 0)) > 2000:
         ctx.execution_config["lookback_bars"] = 2000
@@ -61,7 +72,8 @@ def run_loop(ctx: BotContext):
     consec_errors = 0
     tick = 0
     state = BotState.INIT
-    next_tick = time.monotonic()
+    scheduler = JitterScheduler(base_seconds=poll, jitter_seconds=10)
+    scheduler.startup_stagger()
     last_control_refresh = 0.0
     paused_reason = None
 
@@ -76,12 +88,16 @@ def run_loop(ctx: BotContext):
         try:
             tick += 1
 
-            # periodic control refresh
+            # periodic control refresh (includes execution_config so poll changes apply next cycle)
             if now - last_control_refresh >= CONTROL_REFRESH_SECONDS:
                 try:
                     ctrl = refresh_controls(ctx.id)
                     ctx.control_config = ctrl.get("control_config", ctx.control_config)
                     ctx.subscription_status = ctrl.get("subscription_status", ctx.subscription_status)
+                    if ctrl.get("execution_config"):
+                        # re-normalize execution config to keep clamps
+                        _, _, ec, _ = normalize_configs(None, None, ctrl.get("execution_config") or {}, None)
+                        ctx.execution_config = ec
                 except Exception as e:
                     log(f"[control_refresh] failed: {e}", level="WARN")
                 last_control_refresh = now
@@ -143,11 +159,11 @@ def run_loop(ctx: BotContext):
                 log(f"[state] transition {last_state.value if last_state else 'none'} -> {state.value}", level="INFO")
                 last_state = state
 
-            # keep steady cadence: schedule next tick and sleep remaining time if positive
-            next_tick += poll
-            sleep_for = max(0, next_tick - time.monotonic())
-            log(f"[poll] finished state={state.value}; sleeping {sleep_for:.2f}s", level="DEBUG")
-            time.sleep(sleep_for)
+            # keep steady cadence with jitter, recomputing poll seconds each cycle to pick up config changes
+            poll = _get_poll_seconds(ctx)
+            interval = scheduler.next_interval(base_override=poll)
+            log(f"[poll] finished state={state.value}; interval={interval:.2f}s base={poll}s", level="DEBUG")
+            scheduler.sleep_for(interval, now)
         except Exception as e:
             consec_errors += 1
             write_event(ctx.id, ctx.user_id, "error", str(e))

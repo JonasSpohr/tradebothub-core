@@ -28,7 +28,9 @@ def normalize_configs(
 
     # Execution
     ec["timeframe"] = ec.get("timeframe") or "1h"
-    ec["poll_interval"] = max(_i(ec.get("poll_interval", 300), 300), MIN_POLL_SECONDS)
+    # Poll interval source: execution_config.poll_interval
+    raw_poll = ec.get("poll_interval", 300)
+    ec["poll_interval_seconds"] = max(_i(raw_poll, 300), MIN_POLL_SECONDS)
     ec["lookback_bars"] = min(_i(ec.get("lookback_bars", 700), 700), MAX_LOOKBACK_BARS)
     ec["order_type"] = ec.get("order_type") or "market"
     ec["max_slippage_bps"] = min(_i(ec.get("max_slippage_bps", 20), 20), MAX_SLIPPAGE_BPS)
