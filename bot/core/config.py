@@ -4,6 +4,14 @@ from bot.core.safety import (
     MAX_TRADES_PER_WEEK, MAX_PYRAMID_LEVELS, MIN_NOTIONAL_USD, MAX_SLIPPAGE_BPS
 )
 
+POLLING_TIER_MINIMUMS = {
+    "standard": 60,
+    "fast_30s": 30,
+    "ultra_15s": 15,
+    "micro_5s": 5,
+}
+DEFAULT_POLL_JITTER_SECONDS = 10
+
 def _i(v: Any, d: int) -> int:
     try: return int(v)
     except Exception: return d
@@ -28,9 +36,18 @@ def normalize_configs(
 
     # Execution
     ec["timeframe"] = ec.get("timeframe") or "1h"
-    # Poll interval source: execution_config.poll_interval
-    raw_poll = ec.get("poll_interval", 300)
-    ec["poll_interval_seconds"] = max(_i(raw_poll, 300), MIN_POLL_SECONDS)
+    tier = str(ec.get("polling_tier") or "standard").lower()
+    tier_min = POLLING_TIER_MINIMUMS.get(tier, MIN_POLL_SECONDS)
+    poll_min = max(_i(ec.get("poll_min_seconds", tier_min), tier_min), MIN_POLL_SECONDS)
+    requested_poll = _i(ec.get("poll_interval_seconds", ec.get("poll_interval", poll_min)), poll_min)
+    poll_interval_seconds = max(requested_poll, poll_min)
+    poll_jitter_seconds = max(_i(ec.get("poll_jitter_seconds", DEFAULT_POLL_JITTER_SECONDS), DEFAULT_POLL_JITTER_SECONDS), 0)
+    ec["polling_tier"] = tier
+    ec["poll_min_seconds"] = poll_min
+    ec["poll_interval_seconds"] = poll_interval_seconds
+    ec["poll_interval"] = poll_interval_seconds  # backward-compat for existing consumers
+    ec["poll_jitter_seconds"] = poll_jitter_seconds
+    ec["effective_poll_seconds"] = poll_interval_seconds
     ec["lookback_bars"] = min(_i(ec.get("lookback_bars", 700), 700), MAX_LOOKBACK_BARS)
     ec["order_type"] = ec.get("order_type") or "market"
     ec["max_slippage_bps"] = min(_i(ec.get("max_slippage_bps", 20), 20), MAX_SLIPPAGE_BPS)

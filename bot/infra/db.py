@@ -23,6 +23,17 @@ def _ensure_data(resp, ctx: str):
         raise RuntimeError(f"{ctx}: empty response")
     return resp.data
 
+def _single(table: str, filters: Dict[str, Any]) -> Dict[str, Any]:
+    sb = supabase_client()
+    q = sb.table(table).select("*")
+    for k, v in filters.items():
+        q = q.eq(k, v)
+    resp = q.single().execute()
+    data = _ensure_data(resp, f"select {table}")
+    if not data:
+        raise RuntimeError(f"{table}: not found")
+    return dict(data)
+
 def notify(
     user_id: str,
     bot_id: Optional[str],
@@ -92,9 +103,23 @@ def refresh_controls(bot_id: str) -> Dict[str, Any]:
     """
     Fetch lightweight control + subscription data to allow runtime toggles.
     """
-    sb = supabase_client()
-    resp = sb.table("bot_context_view").select("control_config,subscription_status,execution_config").eq("id", bot_id).single().execute()
-    return _ensure_data(resp, "refresh_controls")
+    bot = _single("bots", {"id": bot_id})
+    control_config = bot.get("control_config") or {}
+    execution_config = bot.get("execution_config") or {}
+    sub_status = "inactive"
+    try:
+        sb = supabase_client()
+        resp = sb.table("subscriptions").select("status").eq("bot_id", bot_id).limit(1).execute()
+        data = resp.data or []
+        if data:
+            sub_status = data[0].get("status") or sub_status
+    except Exception:
+        pass
+    return {
+        "control_config": control_config,
+        "execution_config": execution_config,
+        "subscription_status": sub_status,
+    }
 
 def touch_heartbeat(bot_id: str, user_id: str):
     """
@@ -121,13 +146,82 @@ def touch_heartbeat(bot_id: str, user_id: str):
         pass
 
 def fetch_bot_context_row(bot_id: str) -> Dict[str, Any]:
+    """
+    Fetch bot context directly from tables to avoid relying on a view.
+    Returns a dict that includes bot fields, api keys, market/exchange info, subscription status,
+    strategy definition, and strategy profile overrides.
+    """
     sb = supabase_client()
-    # Expect a view named bot_context_view that returns the joined bot context (see deploy SQL).
-    resp = sb.table("bot_context_view").select("*").eq("id", bot_id).single().execute()
-    row = resp.data
-    if not row:
-        raise RuntimeError(f"bot_not_found: {bot_id}")
-    return dict(row)
+
+    bot = _single("bots", {"id": bot_id})
+
+    # API keys (encrypted)
+    api_keys = _single("api_keys", {"bot_id": bot_id})
+
+    # Exchange + market metadata
+    ex = _single("supported_exchanges", {"id": bot["exchange_id"]})
+    market = _single("supported_markets", {"id": bot["market_id"]})
+
+    # Subscription status (optional)
+    sub_status = "inactive"
+    try:
+        sub_resp = sb.table("subscriptions").select("status").eq("bot_id", bot_id).limit(1).execute()
+        sub_data = sub_resp.data or []
+        if sub_data:
+            sub_status = sub_data[0].get("status") or sub_status
+    except Exception:
+        pass
+
+    # Strategy definition + profile overrides
+    strategy_definition = {}
+    strategy_version = None
+    strategy_key = bot.get("strategy")
+    profile_overrides: Dict[str, Any] = {}
+    profile_key = bot.get("profile_key") or bot.get("profile")
+
+    if bot.get("strategy_version_id"):
+        strategy_version = _single("strategy_versions", {"id": bot["strategy_version_id"]})
+        strategy_definition = strategy_version.get("definition") or {}
+        try:
+            strat_row = _single("strategies", {"id": strategy_version["strategy_id"]})
+            strategy_key = strat_row.get("strategy_key", strategy_key)
+        except Exception:
+            pass
+        try:
+            if bot.get("strategy_profile_id"):
+                sp = _single("strategy_profiles", {"id": bot["strategy_profile_id"]})
+                profile_overrides = sp.get("overrides") or {}
+                profile_key = sp.get("profile_key", profile_key)
+            elif profile_key:
+                sp_resp = (
+                    sb.table("strategy_profiles")
+                    .select("id,overrides,profile_key")
+                    .eq("strategy_version_id", bot["strategy_version_id"])
+                    .eq("profile_key", profile_key)
+                    .limit(1)
+                    .execute()
+                )
+                sp_data = sp_resp.data or []
+                if sp_data:
+                    profile_overrides = sp_data[0].get("overrides") or {}
+        except Exception:
+            pass
+
+    row = {
+        **bot,
+        "strategy_key": strategy_key,
+        "api_key_encrypted": api_keys.get("api_key_encrypted"),
+        "api_secret_encrypted": api_keys.get("api_secret_encrypted"),
+        "api_password_encrypted": api_keys.get("api_password_encrypted"),
+        "api_uid_encrypted": api_keys.get("api_uid_encrypted"),
+        "exchange_ccxt_id": ex.get("ccxt_id"),
+        "market_symbol": market.get("symbol"),
+        "subscription_status": sub_status,
+        "strategy_definition": strategy_definition,
+        "strategy_profile_overrides": profile_overrides,
+        "strategy_profile_key": profile_key,
+    }
+    return row
 
 def write_event(bot_id: str, user_id: str, event_type: str, message: str):
     try:

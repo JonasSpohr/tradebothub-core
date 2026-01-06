@@ -7,22 +7,76 @@ from bot.infra.crypto import decrypt
 from bot.infra.exchange import create_exchange, fetch_ohlcv_df, fetch_last_price
 from bot.infra.monitoring import record_exception
 from bot.infra.healthcheck import ensure_healthcheck
+from bot.strategies.dynamic import DynamicStrategy
+
+def _merge_section(base: dict, overlay: dict) -> dict:
+    out = dict(base or {})
+    for k, v in (overlay or {}).items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = _merge_section(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+def _extract_sections(source: dict) -> tuple[dict, dict, dict, dict]:
+    if not isinstance(source, dict):
+        return {}, {}, {}, {}
+    # support both {strategy: {...}} and {strategy_config: {...}}
+    def _sec(names):
+        for n in names:
+            val = source.get(n)
+            if isinstance(val, dict):
+                return dict(val)
+        return {}
+    return (
+        _sec(["strategy", "strategy_config"]),
+        _sec(["risk", "risk_config"]),
+        _sec(["execution", "execution_config"]),
+        _sec(["control", "control_config"]),
+    )
+
+def _resolve_configs(definition: dict, profile_overrides: dict, user_overrides: dict, bot_cfgs: dict):
+    """
+    Merge definition defaults -> profile overrides -> user overrides -> persisted bot configs.
+    """
+    defaults = definition.get("defaults") or {}
+    def_sc, def_rc, def_ec, def_cc = _extract_sections(defaults)
+    ov_sc, ov_rc, ov_ec, ov_cc = _extract_sections(profile_overrides or {})
+    user_sc, user_rc, user_ec, user_cc = _extract_sections(user_overrides or {})
+    bot_sc, bot_rc, bot_ec, bot_cc = (
+        bot_cfgs.get("strategy_config") or {},
+        bot_cfgs.get("risk_config") or {},
+        bot_cfgs.get("execution_config") or {},
+        bot_cfgs.get("control_config") or {},
+    )
+
+    strategy_cfg = _merge_section(_merge_section(_merge_section(def_sc, ov_sc), user_sc), bot_sc)
+    risk_cfg = _merge_section(_merge_section(_merge_section(def_rc, ov_rc), user_rc), bot_rc)
+    exec_cfg = _merge_section(_merge_section(_merge_section(def_ec, ov_ec), user_ec), bot_ec)
+    control_cfg = _merge_section(_merge_section(_merge_section(def_cc, ov_cc), user_cc), bot_cc)
+    return strategy_cfg, risk_cfg, exec_cfg, control_cfg
 
 def load_context(bot_id: str) -> BotContext:
     row = fetch_bot_context_row(bot_id)
 
-    sc, rc, ec, cc = normalize_configs(
-        row.get("strategy_config") or {},
-        row.get("risk_config") or {},
-        row.get("execution_config") or {},
-        row.get("control_config") or {},
+    sc, rc, ec, cc = _resolve_configs(
+        row.get("strategy_definition") or {},
+        row.get("strategy_profile_overrides") or {},
+        row.get("user_overrides") or {},
+        {
+            "strategy_config": row.get("strategy_config") or {},
+            "risk_config": row.get("risk_config") or {},
+            "execution_config": row.get("execution_config") or {},
+            "control_config": row.get("control_config") or {},
+        },
     )
+    sc, rc, ec, cc = normalize_configs(sc, rc, ec, cc)
 
-    return BotContext(
+    ctx = BotContext(
         id=row["id"],
         user_id=row["user_id"],
         name=row["name"],
-        strategy=row["strategy"],
+        strategy=row.get("strategy_key") or row.get("strategy"),
         mode=row["mode"],
         dry_run=bool(row["dry_run"]),
         subscription_status=row["subscription_status"],
@@ -37,6 +91,13 @@ def load_context(bot_id: str) -> BotContext:
         execution_config=ec,
         control_config=cc,
     )
+    # Attach dynamic strategy instance if definition is present
+    if row.get("strategy_definition"):
+        ctx._strategy = DynamicStrategy(row["strategy_definition"])
+    ctx.strategy_definition = row.get("strategy_definition")
+    ctx.strategy_profile_key = row.get("strategy_profile_key")
+    ctx.user_overrides = row.get("user_overrides")
+    return ctx
 
 def start(bot_id: str):
     from bot.infra.monitoring import init_newrelic
@@ -85,7 +146,8 @@ def start(bot_id: str):
         log("Connectivity verified; entering main loop")
 
         # Ensure healthcheck exists and stash ping URL on context
-        ctx._hc_ping_url = ensure_healthcheck(ctx.id, f"bot-{ctx.name}", int(ctx.execution_config["poll_interval"]))
+        poll_seconds = int(ctx.execution_config.get("effective_poll_seconds", ctx.execution_config.get("poll_interval", 300)))
+        ctx._hc_ping_url = ensure_healthcheck(ctx.id, f"bot-{ctx.name}", poll_seconds)
 
         write_event(ctx.id, ctx.user_id, "started", f"strategy={ctx.strategy} tf={ctx.execution_config['timeframe']}")
         write_event(ctx.id, ctx.user_id, "status", "running")

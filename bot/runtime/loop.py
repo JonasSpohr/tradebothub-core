@@ -11,9 +11,10 @@ from bot.infra.monitoring import ping_healthchecks
 from bot.infra.healthcheck import ping_healthcheck, fail_healthcheck
 from bot.infra.exchange import fetch_ohlcv_df
 from bot.runtime.scheduler import JitterScheduler
-from bot.core.config import normalize_configs
+from bot.core.config import normalize_configs, POLLING_TIER_MINIMUMS
 
 CONTROL_REFRESH_SECONDS = 60
+CONTROL_REFRESH_POLLS = 20
 
 class BotState(Enum):
     INIT = "init"
@@ -46,18 +47,35 @@ def _has_min_bars(ctx: BotContext, strategy) -> bool:
         log(f"[warmup] failed to fetch bars: {e}", level="WARN")
         return False
 
-def _get_poll_seconds(ctx: BotContext) -> int:
-    # pull from execution_config.poll_interval
-    raw = ctx.execution_config.get("poll_interval", 300)
+def _resolve_polling(ctx: BotContext) -> tuple[int, int, int, str, int]:
+    """
+    Derive effective polling config with local clamps.
+    Returns (effective_poll, poll_min, poll_jitter, tier, requested_poll).
+    """
+    ec = ctx.execution_config or {}
+    tier = str(ec.get("polling_tier", "standard")).lower()
+    tier_min = POLLING_TIER_MINIMUMS.get(tier, MIN_POLL_SECONDS)
     try:
-        val = int(raw)
+        poll_min = int(ec.get("poll_min_seconds", tier_min))
     except Exception:
-        val = 300
-    return max(val, MIN_POLL_SECONDS)
+        poll_min = tier_min
+    poll_min = max(poll_min, tier_min, MIN_POLL_SECONDS)
+    try:
+        requested = int(ec.get("poll_interval_seconds", ec.get("poll_interval", poll_min)))
+    except Exception:
+        requested = poll_min
+    try:
+        poll_jitter = int(ec.get("poll_jitter_seconds", 10))
+    except Exception:
+        poll_jitter = 10
+    poll_jitter = max(poll_jitter, 0)
+    effective_poll = max(requested, poll_min)
+    ctx.execution_config["effective_poll_seconds"] = effective_poll
+    return effective_poll, poll_min, poll_jitter, tier, requested
 
 def run_loop(ctx: BotContext):
-    strategy = get_strategy(ctx.strategy)
-    poll = _get_poll_seconds(ctx)
+    strategy = getattr(ctx, "_strategy", None) or get_strategy(ctx.strategy)
+    poll, poll_min, poll_jitter, poll_tier, requested_poll = _resolve_polling(ctx)
     # Clamps for safety
     if int(ctx.execution_config.get("lookback_bars", 0)) > 2000:
         ctx.execution_config["lookback_bars"] = 2000
@@ -72,13 +90,18 @@ def run_loop(ctx: BotContext):
     consec_errors = 0
     tick = 0
     state = BotState.INIT
-    scheduler = JitterScheduler(base_seconds=poll, jitter_seconds=10)
+    scheduler = JitterScheduler(base_seconds=poll, jitter_seconds=poll_jitter, min_seconds=poll_min)
     scheduler.startup_stagger()
     last_control_refresh = 0.0
+    control_refresh_polls = 0
     paused_reason = None
 
     log(
         f"=== RUN {ctx.name} strategy={ctx.strategy} symbol={ctx.market_symbol} tf={ctx.execution_config.get('timeframe')} poll={poll}s ===",
+        level="INFO",
+    )
+    log(
+        f"[polling] tier={poll_tier} requested={requested_poll}s effective={poll}s min={poll_min}s jitter=+/-{poll_jitter}s",
         level="INFO",
     )
 
@@ -87,20 +110,24 @@ def run_loop(ctx: BotContext):
         now = time.monotonic()
         try:
             tick += 1
+            control_refresh_polls += 1
 
-            # periodic control refresh (includes execution_config so poll changes apply next cycle)
-            if now - last_control_refresh >= CONTROL_REFRESH_SECONDS:
+            # periodic control refresh (control + subscription only)
+            if (now - last_control_refresh >= CONTROL_REFRESH_SECONDS) or control_refresh_polls >= CONTROL_REFRESH_POLLS:
                 try:
                     ctrl = refresh_controls(ctx.id)
-                    ctx.control_config = ctrl.get("control_config", ctx.control_config)
-                    ctx.subscription_status = ctrl.get("subscription_status", ctx.subscription_status)
-                    if ctrl.get("execution_config"):
-                        # re-normalize execution config to keep clamps
-                        _, _, ec, _ = normalize_configs(None, None, ctrl.get("execution_config") or {}, None)
-                        ctx.execution_config = ec
+                    if ctrl:
+                        _, _, _, cc = normalize_configs(None, None, None, ctrl.get("control_config") or ctx.control_config)
+                        ctx.control_config = cc
+                        ctx.subscription_status = ctrl.get("subscription_status", ctx.subscription_status)
                 except Exception as e:
                     log(f"[control_refresh] failed: {e}", level="WARN")
                 last_control_refresh = now
+                control_refresh_polls = 0
+                if ctx.subscription_status != "active":
+                    write_event(ctx.id, ctx.user_id, "stopped_payment", "Subscription inactive; stopping bot")
+                    log("[control_refresh] subscription inactive; stopping bot loop", level="WARN")
+                    return
 
             pause_reason = _pause_reason(ctx)
 
@@ -160,9 +187,13 @@ def run_loop(ctx: BotContext):
                 last_state = state
 
             # keep steady cadence with jitter, recomputing poll seconds each cycle to pick up config changes
-            poll = _get_poll_seconds(ctx)
-            interval = scheduler.next_interval(base_override=poll)
-            log(f"[poll] finished state={state.value}; interval={interval:.2f}s base={poll}s", level="DEBUG")
+            poll, poll_min, poll_jitter, _, requested_poll = _resolve_polling(ctx)
+            interval = scheduler.next_interval(
+                base_override=poll,
+                jitter_override=poll_jitter,
+                min_override=poll_min,
+            )
+            log(f"[poll] finished state={state.value}; interval={interval:.2f}s base={poll}s min={poll_min}s jitter=+/-{poll_jitter}s req={requested_poll}s", level="DEBUG")
             scheduler.sleep_for(interval, now)
         except Exception as e:
             consec_errors += 1
