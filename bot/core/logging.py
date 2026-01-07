@@ -32,10 +32,17 @@ _LEVEL_MAP = {
 _context_attrs: dict = {}
 
 def log(msg: str, level: str = "INFO"):
-    lvl = _LEVEL_MAP.get(level.upper(), logging.INFO)
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S%z")
-    _logger.log(lvl, f"[{ts}] {msg}")
-    _maybe_send_log_api(msg, level.upper(), ts)
+    lvl_name = level.upper()
+    lvl = _LEVEL_MAP.get(lvl_name, logging.INFO)
+    ts = datetime.now(timezone.utc).isoformat()
+    line = json.dumps({
+        "ts": ts,
+        "level": lvl_name.lower(),
+        "msg": msg,
+        **_context_attrs,
+    }, separators=(",", ":"), ensure_ascii=False)
+    _logger.log(lvl, line)
+    _maybe_send_log_api(msg, lvl_name, ts)
 
 def attach_newrelic_handler():
     """
