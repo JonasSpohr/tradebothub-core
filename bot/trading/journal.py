@@ -1,10 +1,15 @@
 from bot.infra.db import (
-    write_event,
-    insert_trade,
-    insert_position_open,
     close_position,
+    insert_position_open,
+    insert_trade,
     notify,
+    queue_email_notification,
+    write_event,
 )
+from bot.infra.notifications import notification_context_payload
+
+TRADE_OPEN_EMAIL_TEMPLATE = "bot_trade_opened"
+TRADE_CLOSE_EMAIL_TEMPLATE = "bot_trade_closed"
 
 def event(ctx, typ: str, msg: str):
     write_event(ctx.id, ctx.user_id, typ, msg)
@@ -32,6 +37,23 @@ def on_entry(ctx, direction: str, entry_price: float, entry_time: str, qty: floa
         body=f"price={entry_price:.6f} qty={qty}",
         severity="info",
         metadata={"position_id": position_id, "direction": direction, "price": entry_price, "qty": qty},
+    )
+
+    ctx_payload = notification_context_payload(ctx)
+    queue_email_notification(
+        user_id=ctx.user_id,
+        bot_id=ctx.id,
+        event_key="trade_opened",
+        email_template=TRADE_OPEN_EMAIL_TEMPLATE,
+        payload={
+            **ctx_payload,
+            "position_id": position_id,
+            "direction": direction,
+            "price": entry_price,
+            "qty": qty,
+        },
+        dedup_id=position_id,
+        throttle_seconds=0,
     )
     return position_id
 
@@ -91,4 +113,23 @@ def on_exit(ctx, position_id: str, direction: str, exit_price: float, exit_time:
             "pnl": realized_pnl,
             "reason": reason,
         },
+    )
+
+    ctx_payload = notification_context_payload(ctx)
+    queue_email_notification(
+        user_id=ctx.user_id,
+        bot_id=ctx.id,
+        event_key="trade_closed",
+        email_template=TRADE_CLOSE_EMAIL_TEMPLATE,
+        payload={
+            **ctx_payload,
+            "position_id": position_id,
+            "direction": direction,
+            "price": exit_price,
+            "qty": qty,
+            "pnl": realized_pnl,
+            "reason": reason,
+        },
+        dedup_id=position_id,
+        throttle_seconds=0,
     )

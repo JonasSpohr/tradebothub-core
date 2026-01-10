@@ -1,9 +1,11 @@
 import os, json
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, Optional
 from supabase import Client, create_client
 
 _supabase: Optional[Client] = None
+
+EMAIL_NOTIFICATION_DEFAULT_THROTTLE_SECONDS = 10 * 60
 
 def supabase_client() -> Client:
     """
@@ -85,6 +87,52 @@ def notify_support(
             "title": title,
             "body": body,
             "metadata": {"target_email": email},
+        }).execute()
+    except Exception:
+        pass
+
+def queue_email_notification(
+    user_id: str,
+    bot_id: Optional[str],
+    event_key: str,
+    email_template: str,
+    payload: Optional[Dict[str, Any]] = None,
+    throttle_seconds: int = EMAIL_NOTIFICATION_DEFAULT_THROTTLE_SECONDS,
+    dedup_id: Optional[str] = None,
+    delay_seconds: int = 0,
+):
+    """
+    Enqueue throttled email notifications without raising so the bot loop isn't blocked.
+    """
+    if not user_id:
+        return
+    try:
+        sb = supabase_client()
+        now = datetime.now(timezone.utc)
+        send_after = now
+        if delay_seconds:
+            send_after = now + timedelta(seconds=delay_seconds)
+        window_token = None
+        if throttle_seconds and throttle_seconds > 0:
+            window_token = int(now.timestamp()) // throttle_seconds
+        components = [
+            user_id or "",
+            bot_id or "",
+            event_key,
+        ]
+        if dedup_id:
+            components.append(str(dedup_id))
+        if window_token is not None:
+            components.append(str(window_token))
+        idempotency_key = "|".join(components)
+        sb.table("notification_queue").insert({
+            "user_id": user_id,
+            "bot_id": bot_id,
+            "event_key": event_key,
+            "email_template": email_template,
+            "payload": payload or {},
+            "idempotency_key": idempotency_key,
+            "send_after": send_after.isoformat(),
         }).execute()
     except Exception:
         pass

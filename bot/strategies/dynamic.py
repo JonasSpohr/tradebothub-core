@@ -56,6 +56,23 @@ class _SafeExpr:
         ast.Compare,
         ast.Name,
         ast.Constant,
+        ast.And,
+        ast.Or,
+        ast.Not,
+        ast.USub,
+        ast.UAdd,
+        ast.Add,
+        ast.Sub,
+        ast.Mult,
+        ast.Div,
+        ast.Eq,
+        ast.NotEq,
+        ast.Lt,
+        ast.LtE,
+        ast.Gt,
+        ast.GtE,
+        ast.Expr,
+        ast.Load,
     )
     ALLOWED_BOOL_OPS = (ast.And, ast.Or)
     ALLOWED_UNARY_OPS = (ast.Not, ast.USub, ast.UAdd)

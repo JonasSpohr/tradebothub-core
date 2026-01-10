@@ -1,6 +1,14 @@
 from bot.core.types import BotContext
 from bot.core.config import normalize_configs
-from bot.infra.db import fetch_bot_context_row, write_event, notify, upsert_state, set_bot_status
+from bot.infra.db import (
+    fetch_bot_context_row,
+    queue_email_notification,
+    write_event,
+    notify,
+    upsert_state,
+    set_bot_status,
+)
+from bot.infra.notifications import notification_context_payload
 from bot.core.logging import log, set_log_context
 from bot.state import PositionState
 from bot.infra.crypto import decrypt
@@ -160,20 +168,36 @@ def start(bot_id: str):
         log(msg, level="ERROR")
         log(f"[startup debug] {type(e).__name__}: {e}", level="ERROR")
         record_exception(e, {"bot_id": bot_id})
+        ctx_obj = locals().get("ctx")
+        user_id = getattr(ctx_obj, "user_id", None) if ctx_obj else None
+        user_id_value = user_id or ""
         try:
-            write_event(bot_id, getattr(ctx, "user_id", None) or "", "error", msg)
+            write_event(bot_id, user_id_value, "error", msg)
             set_bot_status(bot_id, "error")
             notify(
-                getattr(ctx, "user_id", None) or "",
+                user_id_value,
                 bot_id,
                 "startup_failed",
                 "Bot failed to start",
                 body=str(e),
                 severity="critical",
             )
+            ctx_payload = notification_context_payload(ctx_obj)
+            queue_email_notification(
+                user_id=user_id,
+                bot_id=bot_id,
+                event_key="startup_failed",
+                email_template="bot_startup_failure",
+                payload={
+                    **ctx_payload,
+                    "message": msg,
+                    "error": str(e),
+                },
+            )
             try:
                 from bot.infra.healthcheck import fail_healthcheck
-                fail_healthcheck(getattr(ctx, "_hc_ping_url", None), str(e))
+
+                fail_healthcheck(getattr(ctx_obj, "_hc_ping_url", None), str(e))
             except Exception:
                 pass
         except Exception:

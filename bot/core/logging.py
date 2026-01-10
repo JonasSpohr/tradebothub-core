@@ -1,10 +1,14 @@
 import logging
 import sys
 from datetime import datetime, timezone
-import os
 import json
+import os
 import threading
 import requests
+
+_LOG_FILE_PATH = os.getenv("BOT_LOG_FILE") or os.path.join(
+    os.getenv("BOT_LOG_DIR") or "logs", "tradebothub.log"
+)
 
 _logger = logging.getLogger("bot")
 if not _logger.handlers:
@@ -13,11 +17,22 @@ if not _logger.handlers:
     handler.setLevel(logging.DEBUG)
     try:
         from newrelic.api.log import NewRelicContextFormatter
+
         fmt = NewRelicContextFormatter("%(asctime)s %(levelname)s %(message)s")
     except Exception:
         fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
     handler.setFormatter(fmt)
     _logger.addHandler(handler)
+    if _LOG_FILE_PATH:
+        try:
+            os.makedirs(os.path.dirname(_LOG_FILE_PATH), exist_ok=True)
+            file_handler = logging.FileHandler(_LOG_FILE_PATH, encoding="utf-8")
+            file_handler.setLevel(logging.DEBUG)
+            file_handler.setFormatter(fmt)
+            _logger.addHandler(file_handler)
+            _logger.info(f"Logging to file: {_LOG_FILE_PATH}")
+        except Exception:
+            pass
     _logger.propagate = True
 
 _LEVEL_MAP = {
