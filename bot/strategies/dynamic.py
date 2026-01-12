@@ -1,27 +1,81 @@
 import ast
+import os
 from typing import Any, Dict, List
 import pandas as pd
 from bot.strategies.base import Strategy
 from bot.indicators import compute_rsi, compute_atr
 
 # Whitelisted indicator functions
-def _ema(series: pd.Series, window: int) -> pd.Series:
-    return series.ewm(span=window, adjust=False).mean()
+def _series_from_source(df: pd.DataFrame, source: str) -> pd.Series:
+    return df[source] if source in df else df["close"]
 
-def _sma(series: pd.Series, window: int) -> pd.Series:
-    return series.rolling(window=window, min_periods=window).mean()
+def _ema(df: pd.DataFrame, window: int, source: str, params: Dict[str, Any]) -> pd.Series:
+    return _series_from_source(df, source).ewm(span=max(1, window), adjust=False).mean()
 
-def _rsi(series: pd.Series, window: int) -> pd.Series:
-    return compute_rsi(series, window)
+def _sma(df: pd.DataFrame, window: int, source: str, params: Dict[str, Any]) -> pd.Series:
+    span = max(1, window)
+    return _series_from_source(df, source).rolling(window=span, min_periods=span).mean()
 
-def _atr(df: pd.DataFrame, window: int) -> pd.Series:
-    return compute_atr(df, window)
+def _rsi(df: pd.DataFrame, window: int, source: str, params: Dict[str, Any]) -> pd.Series:
+    return compute_rsi(_series_from_source(df, source), max(1, window))
+
+def _atr(df: pd.DataFrame, window: int, source: str, params: Dict[str, Any]) -> pd.Series:
+    return compute_atr(df, max(1, window))
+
+def _donchian_high(df: pd.DataFrame, window: int, source: str, params: Dict[str, Any]) -> pd.Series:
+    span = max(1, window)
+    target = source if source in df else "high"
+    return df[target].rolling(window=span, min_periods=span).max()
+
+def _donchian_low(df: pd.DataFrame, window: int, source: str, params: Dict[str, Any]) -> pd.Series:
+    span = max(1, window)
+    target = source if source in df else "low"
+    return df[target].rolling(window=span, min_periods=span).min()
+
+def _vol_sma(df: pd.DataFrame, window: int, source: str, params: Dict[str, Any]) -> pd.Series:
+    span = max(1, window)
+    if source in df:
+        series = df[source]
+    else:
+        series = df.get("volume", pd.Series([0.0] * len(df), index=df.index))
+    return series.rolling(window=span, min_periods=span).mean()
+
+def _bb_mid(df: pd.DataFrame, window: int, source: str, params: Dict[str, Any]) -> pd.Series:
+    span = max(1, window)
+    return _series_from_source(df, source).rolling(window=span, min_periods=span).mean()
+
+def _bb_width(df: pd.DataFrame, window: int, source: str, params: Dict[str, Any]) -> pd.Series:
+    span = max(1, window)
+    series = _series_from_source(df, source)
+    mid = series.rolling(window=span, min_periods=span).mean()
+    std = series.rolling(window=span, min_periods=span).std(ddof=0).fillna(0.0)
+    mult = float(params.get("mult") or 2.0)
+    upper = mid + (std * mult)
+    lower = mid - (std * mult)
+    width = upper - lower
+    denom = mid.copy()
+    denom[denom == 0] = 1.0
+    return width / denom
+
+def _sentiment_score(df: pd.DataFrame, window: int, source: str, params: Dict[str, Any]) -> pd.Series:
+    env_var = params.get("env_var") or "SENTIMENT_SCORE"
+    try:
+        score = float(os.getenv(env_var, "0"))
+    except ValueError:
+        score = 0.0
+    return pd.Series([score] * len(df), index=df.index)
 
 INDICATOR_FNS = {
     "ema": _ema,
     "sma": _sma,
     "rsi": _rsi,
     "atr": _atr,
+    "donchian_high": _donchian_high,
+    "donchian_low": _donchian_low,
+    "vol_sma": _vol_sma,
+    "bb_mid": _bb_mid,
+    "bb_width": _bb_width,
+    "sentiment_score": _sentiment_score,
 }
 
 
@@ -184,12 +238,10 @@ class DynamicStrategy(Strategy):
         func = INDICATOR_FNS.get(fn_key)
         if not func:
             raise ValueError(f"Unsupported indicator fn: {fn_key}")
-        window = _clamp_int(ind.get("window"), 14, self.window_min, self.window_max)
+        span = _clamp_int(ind.get("window"), 14, self.window_min, self.window_max)
         source = _safe_name(ind.get("source") or "close")
-        if fn_key == "atr":
-            return func(df, window)
-        series = df[source] if source in df else df["close"]
-        return func(series, window)
+        params = ind.get("params") or {}
+        return func(df, span, source, params)
 
     def prepare(self, df: pd.DataFrame, cfg: Dict[str, Any]) -> pd.DataFrame:
         df = df.copy()
