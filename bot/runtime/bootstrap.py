@@ -1,3 +1,7 @@
+import os
+import threading
+import time
+
 from bot.core.types import BotContext
 from bot.core.config import normalize_configs
 from bot.infra.db import (
@@ -16,6 +20,11 @@ from bot.infra.exchange import create_exchange, fetch_ohlcv_df, fetch_last_price
 from bot.infra.monitoring import record_exception
 from bot.infra.healthcheck import ensure_healthcheck
 from bot.strategies.dynamic import DynamicStrategy
+from bot.trading.position import STATE, _exchange
+from bot.health.reporter import HealthReporter, init_reporter, start_health_flush_loop
+from bot.health.types import map_exception_to_reason, is_rate_limit_exception
+from bot.exchange.provider import CcxtExchangeProvider
+from bot.services.exchange_sync import ExchangeSyncError, ExchangeSyncService
 
 def _merge_section(base: dict, overlay: dict) -> dict:
     out = dict(base or {})
@@ -116,6 +125,16 @@ def start(bot_id: str):
     try:
         ctx = load_context(bot_id)
         log(f"Loaded context for bot {ctx.id} ({ctx.name})")
+        tier_env = os.environ.get("POLLING_TIER")
+        tier_cfg = ctx.execution_config.get("polling_tier")
+        tier = tier_env or tier_cfg or "standard"
+        reporter = init_reporter(ctx.id, tier=tier)
+        start_health_flush_loop(reporter)
+        exchange_client = _exchange(ctx)
+        exchange_sync = ExchangeSyncService(ctx, CcxtExchangeProvider(exchange_client))
+        ctx._exchange_sync_service = exchange_sync
+        exchange_sync.startup_sync()
+        _start_position_sync_loop(ctx, reporter)
         set_log_context(
             bot_id=ctx.id,
             user_id=ctx.user_id,
@@ -150,8 +169,13 @@ def start(bot_id: str):
             return
 
         # Sanity check exchange connectivity and market before entering loop.
-        _assert_connectivity(ctx)
+        try:
+            _assert_connectivity(ctx, reporter)
+        except Exception as exc:
+            reporter.mark_auth_fail(map_exception_to_reason(exc))
+            raise
         log("Connectivity verified; entering main loop")
+        reporter.mark_auth_ok()
 
         # Ensure healthcheck exists and stash ping URL on context
         poll_seconds = int(ctx.execution_config.get("effective_poll_seconds", ctx.execution_config.get("poll_interval", 300)))
@@ -204,7 +228,7 @@ def start(bot_id: str):
             pass
         return
 
-def _assert_connectivity(ctx: BotContext):
+def _assert_connectivity(ctx: BotContext, reporter: HealthReporter):
     """
     Verify we can decrypt keys, create exchange client, fetch ticker and a small OHLCV sample.
     Raise user-friendly errors if something fails.
@@ -216,6 +240,7 @@ def _assert_connectivity(ctx: BotContext):
         api_password = decrypt(ctx.api_password_encrypted)
         api_uid = decrypt(ctx.api_uid_encrypted)
     except Exception as e:
+        _maybe_record_rate_limit(reporter, e)
         raise RuntimeError("Could not decrypt API credentials. Check BOT_ENC_KEY and stored keys.") from e
 
     if not api_key or not api_secret:
@@ -225,26 +250,31 @@ def _assert_connectivity(ctx: BotContext):
         log(f"Connectivity check: creating exchange client {ctx.exchange_ccxt_id}")
         ex = create_exchange(ctx.exchange_ccxt_id, api_key, api_secret, api_password, api_uid)
     except Exception as e:
+        _maybe_record_rate_limit(reporter, e)
         raise RuntimeError(f"Failed to create exchange client ({ctx.exchange_ccxt_id}). Check credentials and exchange id.") from e
 
     try:
         log(f"Connectivity check: fetching ticker for {ctx.market_symbol}")
         fetch_last_price(ex, ctx.market_symbol)
     except Exception as e:
+        _maybe_record_rate_limit(reporter, e)
         raise RuntimeError(f"Could not fetch ticker for {ctx.market_symbol}. Verify the symbol is correct and supported.") from e
 
     try:
         log(f"Connectivity check: fetching OHLCV for {ctx.market_symbol} tf={ctx.execution_config['timeframe']}")
         fetch_ohlcv_df(ex, ctx.market_symbol, ctx.execution_config["timeframe"], 5)
     except Exception as e:
+        _maybe_record_rate_limit(reporter, e)
         raise RuntimeError(f"Could not fetch market data for {ctx.market_symbol} on timeframe {ctx.execution_config['timeframe']}.") from e
 
     try:
         from bot.infra.exchange import fetch_quote_balance
+
         log(f"Connectivity check: fetching balance for quote currency of {ctx.market_symbol}")
         bal = fetch_quote_balance(ex, ctx.market_symbol)
         log(f"Connectivity check: balance={bal}")
     except Exception as e:
+        _maybe_record_rate_limit(reporter, e)
         raise RuntimeError(f"Could not fetch account balance. Verify API key permissions (trading/reading balances).") from e
 
     # Connectivity confirmed; record event/notification.
@@ -257,3 +287,48 @@ def _assert_connectivity(ctx: BotContext):
         body=f"{ctx.exchange_ccxt_id} {ctx.market_symbol}",
         severity="info",
     )
+
+
+def _maybe_record_rate_limit(reporter: HealthReporter, exc: Exception) -> None:
+    try:
+        if is_rate_limit_exception(exc):
+            reporter.record_rate_limit_hit()
+    except Exception:
+        pass
+
+
+def _start_position_sync_loop(ctx: BotContext, reporter: HealthReporter) -> None:
+    def _worker() -> None:
+        while True:
+            if not STATE.in_position:
+                time.sleep(5)
+                continue
+            diff = _estimate_position_diff(ctx)
+            reporter.record_position_sync(diff)
+            time.sleep(60)
+
+    thread = threading.Thread(target=_worker, daemon=True, name="health-position-sync")
+    thread.start()
+
+
+def _estimate_position_diff(ctx: BotContext) -> float:
+    try:
+        if not STATE.in_position:
+            return 0.0
+        ex = _exchange(ctx)
+        base = _extract_base_asset(ctx.market_symbol)
+        balance = ex.fetch_balance()
+        asset_entry = balance.get(base) or {}
+        actual_qty = float(asset_entry.get("total") or asset_entry.get("free") or 0.0)
+        return abs(STATE.qty - actual_qty)
+    except Exception as exc:
+        log(f"[health position] sync failed: {type(exc).__name__}: {exc}", level="WARN")
+        return 0.0
+
+
+def _extract_base_asset(symbol: str) -> str:
+    if "/" in symbol:
+        return symbol.split("/")[0]
+    if "-" in symbol:
+        return symbol.split("-")[0]
+    return symbol

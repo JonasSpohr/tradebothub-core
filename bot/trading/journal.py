@@ -14,8 +14,34 @@ TRADE_CLOSE_EMAIL_TEMPLATE = "bot_trade_closed"
 def event(ctx, typ: str, msg: str):
     write_event(ctx.id, ctx.user_id, typ, msg)
 
-def on_entry(ctx, direction: str, entry_price: float, entry_time: str, qty: float) -> str:
-    position_id = insert_position_open(ctx.id, ctx.user_id, direction, entry_price, entry_time, qty)
+def on_entry(
+    ctx,
+    direction: str,
+    entry_price: float,
+    entry_time: str,
+    qty: float,
+    *,
+    entry_exchange_order_id: str | None = None,
+    entry_client_order_id: str | None = None,
+    payload: dict | None = None,
+) -> str:
+    position_id = insert_position_open(
+        ctx.id,
+        ctx.user_id,
+        direction,
+        entry_price,
+        entry_time,
+        qty,
+        symbol=ctx.market_symbol,
+        exchange=ctx.exchange_ccxt_id,
+        margin_mode=str(ctx.execution_config.get("margin_mode", "") or "cross"),
+        position_side=direction,
+        entry_exchange_order_id=entry_exchange_order_id,
+        entry_client_order_id=entry_client_order_id,
+        exchange_account_ref=ctx.execution_config.get("exchange_account_ref"),
+        exchange_payload=payload,
+    )
+    ctx.position_id = position_id
 
     insert_trade(
         bot_id=ctx.id,
@@ -80,8 +106,31 @@ def on_pyramid(ctx, position_id: str, direction: str, price: float, qty: float, 
         metadata={"position_id": position_id, "direction": direction, "price": price, "qty": qty},
     )
 
-def on_exit(ctx, position_id: str, direction: str, exit_price: float, exit_time: str, qty: float, realized_pnl: float, reason: str):
-    close_position(position_id, exit_price, exit_time, realized_pnl)
+def on_exit(
+    ctx,
+    position_id: str,
+    direction: str,
+    exit_price: float,
+    exit_time: str,
+    qty: float,
+    realized_pnl: float,
+    reason: str,
+    *,
+    exit_exchange_order_id: str | None = None,
+    exit_client_order_id: str | None = None,
+    payload: dict | None = None,
+):
+    close_position(
+        position_id,
+        exit_price,
+        exit_time,
+        realized_pnl,
+        bot_id=ctx.id,
+        exit_exchange_order_id=exit_exchange_order_id,
+        exit_client_order_id=exit_client_order_id,
+        exchange_payload=payload,
+    )
+    ctx.position_id = ""
 
     insert_trade(
         bot_id=ctx.id,

@@ -1,7 +1,9 @@
-import os, json
+import os
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, Optional
 from supabase import Client, create_client
+
+from bot.health.reporter import get_reporter_optional
 
 _supabase: Optional[Client] = None
 
@@ -24,6 +26,157 @@ def _ensure_data(resp, ctx: str):
     if resp.data is None:
         raise RuntimeError(f"{ctx}: empty response")
     return resp.data
+
+def _record_db_ok():
+    reporter = get_reporter_optional()
+    if reporter:
+        reporter.record_db_ok()
+
+
+def _record_db_error():
+    reporter = get_reporter_optional()
+    if reporter:
+        reporter.record_db_error()
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+def get_open_position(bot_id: str) -> Optional[Dict[str, Any]]:
+    try:
+        sb = supabase_client()
+        resp = (
+            sb.table("bot_positions")
+            .select("*")
+            .eq("bot_id", bot_id)
+            .eq("status", "open")
+            .limit(1)
+            .execute()
+        )
+        data = resp.data or []
+        if not data:
+            _record_db_ok()
+            return None
+        _record_db_ok()
+        return dict(data[0])
+    except Exception:
+        _record_db_error()
+        return None
+
+def set_exchange_sync_status(bot_id: str, status: str):
+    try:
+        sb = supabase_client()
+        sb.table("bot_state").update(
+            {
+                "exchange_sync_status": status,
+                "updated_at": _now_iso(),
+            }
+        ).eq("bot_id", bot_id).execute()
+        _record_db_ok()
+    except Exception:
+        _record_db_error()
+        raise
+
+def update_position_from_exchange(
+    bot_id: str,
+    position_id: str,
+    *,
+    qty: float,
+    entry_price: float,
+    mark_price: float | None,
+    unrealized_pnl: float,
+    symbol: str,
+    exchange: str,
+    position_side: str,
+    margin_mode: str | None,
+    exchange_account_ref: str | None = None,
+    exchange_position_id: str | None = None,
+    exchange_position_key: str | None = None,
+    payload: dict | None = None,
+    entry_payload: dict | None = None,
+):
+    try:
+        sb = supabase_client()
+        now_iso = _now_iso()
+        updates: Dict[str, Any] = {
+            "qty": qty,
+            "entry_price": entry_price,
+            "mark_price": mark_price,
+            "unrealized_pnl": unrealized_pnl,
+            "unrealized_pnl_source": "exchange",
+            "symbol": symbol,
+            "exchange": exchange,
+            "position_side": position_side,
+            "margin_mode": margin_mode,
+            "exchange_account_ref": exchange_account_ref,
+            "exchange_position_id": exchange_position_id,
+            "exchange_position_key": exchange_position_key,
+            "last_exchange_sync_at": now_iso,
+            "exchange_payload": payload or {},
+            "status": "open",
+        }
+        if entry_payload:
+            updates["exchange_payload"] = {**updates["exchange_payload"], **entry_payload}
+        sb.table("bot_positions").update(
+            updates
+        ).eq("bot_id", bot_id).eq("id", position_id).execute()
+        _record_db_ok()
+    except Exception:
+        _record_db_error()
+        raise
+
+def log_order_submission(
+    bot_id: str,
+    user_id: str,
+    position_id: str | None,
+    *,
+    exchange_order_id: str,
+    client_order_id: str,
+    symbol: str,
+    side: str,
+    order_type: str,
+    reduce_only: bool,
+    order_status: str,
+    order_amount: float,
+    order_price: float | None,
+    payload: dict | None,
+):
+    try:
+        sb = supabase_client()
+        sb.table("bot_trades").insert(
+            {
+                "bot_id": bot_id,
+                "user_id": user_id,
+                "position_id": position_id,
+                "exchange_order_id": exchange_order_id,
+                "client_order_id": client_order_id,
+                "symbol": symbol,
+                "side": side,
+                "order_type": order_type,
+                "order_status": order_status,
+                "reduce_only": reduce_only,
+                "filled_qty": order_amount,
+                "avg_fill_price": order_price,
+                "exchange_payload": payload or {},
+            }
+        ).execute()
+        _record_db_ok()
+    except Exception:
+        _record_db_error()
+        raise
+
+def update_trade_status(
+    bot_id: str,
+    exchange_order_id: str,
+    *,
+    updates: Dict[str, Any],
+):
+    try:
+        sb = supabase_client()
+        sb.table("bot_trades").update(updates).eq("bot_id", bot_id).eq("exchange_order_id", exchange_order_id).execute()
+        _record_db_ok()
+    except Exception:
+        _record_db_error()
+        raise
 
 def _single(table: str, filters: Dict[str, Any]) -> Dict[str, Any]:
     sb = supabase_client()
@@ -61,7 +214,9 @@ def notify(
             "body": body,
             "metadata": metadata or {},
         }).execute()
+        _record_db_ok()
     except Exception:
+        _record_db_error()
         pass
 
 def notify_support(
@@ -88,7 +243,9 @@ def notify_support(
             "body": body,
             "metadata": {"target_email": email},
         }).execute()
+        _record_db_ok()
     except Exception:
+        _record_db_error()
         pass
 
 def queue_email_notification(
@@ -134,7 +291,9 @@ def queue_email_notification(
             "idempotency_key": idempotency_key,
             "send_after": send_after.isoformat(),
         }).execute()
+        _record_db_ok()
     except Exception:
+        _record_db_error()
         pass
 
 def set_bot_status(bot_id: str, status: str):
@@ -144,7 +303,9 @@ def set_bot_status(bot_id: str, status: str):
     try:
         sb = supabase_client()
         sb.table("bots").update({"status": status}).eq("id", bot_id).execute()
+        _record_db_ok()
     except Exception:
+        _record_db_error()
         pass
 
 def refresh_controls(bot_id: str) -> Dict[str, Any]:
@@ -190,7 +351,9 @@ def touch_heartbeat(bot_id: str, user_id: str):
                 sb.table("bot_events").update({"message": iso}).eq("id", data[0]["id"]).execute()
         except Exception:
             pass
+        _record_db_ok()
     except Exception:
+        _record_db_error()
         pass
 
 def fetch_bot_context_row(bot_id: str) -> Dict[str, Any]:
@@ -280,70 +443,132 @@ def write_event(bot_id: str, user_id: str, event_type: str, message: str):
             "event_type": event_type,
             "message": message,
         }).execute()
+        _record_db_ok()
     except Exception:
+        _record_db_error()
         pass
 
 def upsert_state(bot_id: str, user_id: str, state: Dict[str, Any]):
-    sb = supabase_client()
-    def _none_if_empty(val):
-        return None if (val is None or val == "") else val
+    try:
+        sb = supabase_client()
+        def _none_if_empty(val):
+            return None if (val is None or val == "") else val
 
-    now_iso = datetime.now(timezone.utc).isoformat()
-    heartbeat = _none_if_empty(state.get("heartbeat_at")) or now_iso
+        now_iso = datetime.now(timezone.utc).isoformat()
+        heartbeat = _none_if_empty(state.get("heartbeat_at")) or now_iso
 
-    payload = {
-        "bot_id": bot_id,
-        "user_id": user_id,
-        "in_position": bool(state.get("in_position", False)),
-        "direction": _none_if_empty(state.get("direction")),
-        "entry_price": state.get("entry_price"),
-        "entry_time": _none_if_empty(state.get("entry_time")),
-        "qty": state.get("qty"),
-        "base_notional": state.get("base_notional"),
-        "peak_price": state.get("peak_price"),
-        "low_price": state.get("low_price"),
-        "added_levels": int(state.get("added_levels", 0)),
-        "week_trade_counts": state.get("week_trade_counts", {}) or {},
-        "last_exit_time": _none_if_empty(state.get("last_exit_time")),
-        "last_candle_time": _none_if_empty(state.get("last_candle_time")),
-        "cumulative_pnl": float(state.get("cumulative_pnl", 0.0)),
-        "max_unrealized_pnl": float(state.get("max_unrealized_pnl", 0.0)),
-        "min_unrealized_pnl": float(state.get("min_unrealized_pnl", 0.0)),
-        "last_price": state.get("last_price"),
-        "unrealized_pnl": float(state.get("unrealized_pnl", 0.0)),
-        "stop_price": state.get("stop_price"),
-        "take_profit_price": state.get("take_profit_price"),
-        "trailing_stop_price": state.get("trailing_stop_price"),
-        "trailing_active": bool(state.get("trailing_active", False)),
-        "atr": state.get("atr"),
-        "last_manage_time": _none_if_empty(state.get("last_manage_time")),
-        "heartbeat_at": heartbeat,
-        # updated_at handled by DB default/trigger if present
-    }
-    sb.table("bot_state").upsert(payload, on_conflict="bot_id").execute()
+        payload = {
+            "bot_id": bot_id,
+            "user_id": user_id,
+            "in_position": bool(state.get("in_position", False)),
+            "direction": _none_if_empty(state.get("direction")),
+            "entry_price": state.get("entry_price"),
+            "entry_time": _none_if_empty(state.get("entry_time")),
+            "qty": state.get("qty"),
+            "base_notional": state.get("base_notional"),
+            "peak_price": state.get("peak_price"),
+            "low_price": state.get("low_price"),
+            "added_levels": int(state.get("added_levels", 0)),
+            "week_trade_counts": state.get("week_trade_counts", {}) or {},
+            "last_exit_time": _none_if_empty(state.get("last_exit_time")),
+            "last_candle_time": _none_if_empty(state.get("last_candle_time")),
+            "cumulative_pnl": float(state.get("cumulative_pnl", 0.0)),
+            "max_unrealized_pnl": float(state.get("max_unrealized_pnl", 0.0)),
+            "min_unrealized_pnl": float(state.get("min_unrealized_pnl", 0.0)),
+            "last_price": state.get("last_price"),
+            "unrealized_pnl": float(state.get("unrealized_pnl", 0.0)),
+            "stop_price": state.get("stop_price"),
+            "take_profit_price": state.get("take_profit_price"),
+            "trailing_stop_price": state.get("trailing_stop_price"),
+            "trailing_active": bool(state.get("trailing_active", False)),
+            "atr": state.get("atr"),
+            "last_manage_time": _none_if_empty(state.get("last_manage_time")),
+            "heartbeat_at": heartbeat,
+            # updated_at handled by DB default/trigger if present
+        }
+        sb.table("bot_state").upsert(payload, on_conflict="bot_id").execute()
+        _record_db_ok()
+    except Exception:
+        _record_db_error()
+        raise
 
-def insert_position_open(bot_id: str, user_id: str, direction: str, entry_price: float, entry_time: str, qty: float) -> str:
-    sb = supabase_client()
-    resp = sb.table("bot_positions").insert({
-        "bot_id": bot_id,
-        "user_id": user_id,
-        "direction": direction,
-        "entry_price": entry_price,
-        "entry_time": entry_time,
-        "qty": qty,
-        "status": "open",
-    }).execute()
-    data = _ensure_data(resp, "insert_position_open")
-    return str(data[0]["id"])
+def insert_position_open(
+    bot_id: str,
+    user_id: str,
+    direction: str,
+    entry_price: float,
+    entry_time: str,
+    qty: float,
+    *,
+    symbol: str | None = None,
+    exchange: str | None = None,
+    margin_mode: str | None = None,
+    position_side: str | None = None,
+    entry_exchange_order_id: str | None = None,
+    entry_client_order_id: str | None = None,
+    exchange_account_ref: str | None = None,
+    mark_price: float | None = None,
+    exchange_payload: Dict[str, Any] | None = None,
+) -> str:
+    try:
+        sb = supabase_client()
+        resp = sb.table("bot_positions").insert({
+            "bot_id": bot_id,
+            "user_id": user_id,
+            "direction": direction,
+            "entry_price": entry_price,
+            "entry_time": entry_time,
+            "qty": qty,
+            "status": "open",
+            "symbol": symbol,
+            "exchange": exchange,
+            "margin_mode": margin_mode,
+            "position_side": position_side,
+            "entry_exchange_order_id": entry_exchange_order_id,
+            "entry_client_order_id": entry_client_order_id,
+            "exchange_account_ref": exchange_account_ref,
+            "mark_price": mark_price,
+            "exchange_payload": exchange_payload or {},
+        }).execute()
+        data = _ensure_data(resp, "insert_position_open")
+        _record_db_ok()
+        return str(data[0]["id"])
+    except Exception:
+        _record_db_error()
+        raise
 
-def close_position(position_id: str, exit_price: float, exit_time: str, realized_pnl: float):
-    sb = supabase_client()
-    sb.table("bot_positions").update({
-        "exit_price": exit_price,
-        "exit_time": exit_time,
-        "realized_pnl": realized_pnl,
-        "status": "closed",
-    }).eq("id", position_id).execute()
+def close_position(
+    position_id: str,
+    exit_price: float,
+    exit_time: str,
+    realized_pnl: float,
+    *,
+    bot_id: str | None = None,
+    exit_exchange_order_id: str | None = None,
+    exit_client_order_id: str | None = None,
+    exchange_payload: Dict[str, Any] | None = None,
+):
+    try:
+        sb = supabase_client()
+        q = sb.table("bot_positions").update({
+            "exit_price": exit_price,
+            "exit_time": exit_time,
+            "realized_pnl": realized_pnl,
+            "status": "closed",
+            "exit_exchange_order_id": exit_exchange_order_id,
+            "exit_client_order_id": exit_client_order_id,
+            "realized_pnl_source": "exchange",
+            "last_exchange_sync_at": _now_iso(),
+            "exchange_payload": exchange_payload or {},
+        })
+        q = q.eq("id", position_id)
+        if bot_id:
+            q = q.eq("bot_id", bot_id)
+        q.execute()
+        _record_db_ok()
+    except Exception:
+        _record_db_error()
+        raise
 
 def insert_trade(
     bot_id: str,
@@ -357,16 +582,21 @@ def insert_trade(
     exchange_order_id: str | None,
     executed_at: str,
 ):
-    sb = supabase_client()
-    sb.table("bot_trades").insert({
-        "bot_id": bot_id,
-        "user_id": user_id,
-        "position_id": position_id,
-        "side": side,
-        "price": price,
-        "qty": qty,
-        "fee": fee,
-        "pnl": pnl,
-        "exchange_order_id": exchange_order_id,
-        "executed_at": executed_at,
-    }).execute()
+    try:
+        sb = supabase_client()
+        sb.table("bot_trades").insert({
+            "bot_id": bot_id,
+            "user_id": user_id,
+            "position_id": position_id,
+            "side": side,
+            "price": price,
+            "qty": qty,
+            "fee": fee,
+            "pnl": pnl,
+            "exchange_order_id": exchange_order_id,
+            "executed_at": executed_at,
+        }).execute()
+        _record_db_ok()
+    except Exception:
+        _record_db_error()
+        raise

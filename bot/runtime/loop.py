@@ -1,6 +1,7 @@
 import time
 from enum import Enum
 from typing import Optional
+
 from bot.core.logging import log
 from bot.core.safety import MAX_CONSECUTIVE_ERRORS, ERROR_BACKOFF_SECONDS, MIN_POLL_SECONDS, MAX_LEVERAGE, MAX_ALLOCATION_FRAC
 from bot.infra.db import write_event, notify, touch_heartbeat, refresh_controls
@@ -13,6 +14,9 @@ from bot.infra.exchange import fetch_ohlcv_df
 from bot.runtime.scheduler import JitterScheduler
 from bot.core.config import normalize_configs, POLLING_TIER_MINIMUMS
 
+from bot.health.reporter import get_reporter
+from bot.health.types import is_rate_limit_exception
+from bot.services.exchange_sync import ExchangeSyncError
 CONTROL_REFRESH_SECONDS = 60
 CONTROL_REFRESH_POLLS = 20
 
@@ -76,6 +80,8 @@ def _resolve_polling(ctx: BotContext) -> tuple[int, int, int, str, int]:
 def run_loop(ctx: BotContext):
     strategy = getattr(ctx, "_strategy", None) or get_strategy(ctx.strategy)
     poll, poll_min, poll_jitter, poll_tier, requested_poll = _resolve_polling(ctx)
+    reporter = get_reporter()
+    exchange_sync = getattr(ctx, "_exchange_sync_service", None)
     # Clamps for safety
     if int(ctx.execution_config.get("lookback_bars", 0)) > 2000:
         ctx.execution_config["lookback_bars"] = 2000
@@ -104,11 +110,21 @@ def run_loop(ctx: BotContext):
         f"[polling] tier={poll_tier} requested={requested_poll}s effective={poll}s min={poll_min}s jitter=+/-{poll_jitter}s",
         level="INFO",
     )
+    reporter.set_tier(poll_tier)
 
     last_state = None
     while True:
         now = time.monotonic()
         try:
+            if exchange_sync:
+                try:
+                    exchange_sync.maybe_sync()
+                except ExchangeSyncError as exc:
+                    log(f"[exchange sync] failing fast: {exc}", level="ERROR")
+                    raise
+            reporter.set_in_position(POSITION_STATE.in_position)
+            reporter.record_strategy_tick_ok()
+            reporter.record_decision()
             tick += 1
             control_refresh_polls += 1
 
@@ -187,7 +203,8 @@ def run_loop(ctx: BotContext):
                 last_state = state
 
             # keep steady cadence with jitter, recomputing poll seconds each cycle to pick up config changes
-            poll, poll_min, poll_jitter, _, requested_poll = _resolve_polling(ctx)
+            poll, poll_min, poll_jitter, poll_tier, requested_poll = _resolve_polling(ctx)
+            reporter.set_tier(poll_tier)
             interval = scheduler.next_interval(
                 base_override=poll,
                 jitter_override=poll_jitter,
@@ -195,11 +212,17 @@ def run_loop(ctx: BotContext):
             )
             log(f"[poll] finished state={state.value}; interval={interval:.2f}s base={poll}s min={poll_min}s jitter=+/-{poll_jitter}s req={requested_poll}s", level="DEBUG")
             scheduler.sleep_for(interval, now)
+        except ExchangeSyncError:
+            raise
         except Exception as e:
             consec_errors += 1
             write_event(ctx.id, ctx.user_id, "error", str(e))
             log(f"ERROR: {e} (consecutive={consec_errors})", level="ERROR")
-            notify(ctx.user_id, ctx.id, "error", "Bot error", body=str(e), severity="critical")
+            reporter.record_strategy_tick_fail()
+            reporter.flush_now("loop_error")
+            if is_rate_limit_exception(e):
+                reporter.record_rate_limit_hit()
+            #notify(ctx.user_id, ctx.id, "error", "Bot error", body=str(e), severity="critical")
 
             if consec_errors >= MAX_CONSECUTIVE_ERRORS:
                 write_event(ctx.id, ctx.user_id, "stopped", "Too many consecutive errors")
