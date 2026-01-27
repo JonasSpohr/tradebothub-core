@@ -7,6 +7,7 @@ from bot.infra.db import (
     write_event,
 )
 from bot.infra.notifications import notification_context_payload
+from bot.utils.ids import generate_client_order_id
 
 TRADE_OPEN_EMAIL_TEMPLATE = "bot_trade_opened"
 TRADE_CLOSE_EMAIL_TEMPLATE = "bot_trade_closed"
@@ -52,8 +53,14 @@ def on_entry(
         qty=qty,
         fee=None,
         pnl=None,
-        exchange_order_id=None,
+        exchange_order_id=entry_exchange_order_id,
         executed_at=entry_time,
+        client_order_id=entry_client_order_id or generate_client_order_id(ctx.id, "entry"),
+        symbol=ctx.market_symbol,
+        order_type="market",
+        order_status="entered",
+        reduce_only=False,
+        exchange_payload=payload,
     )
     notify(
         ctx.user_id,
@@ -95,6 +102,11 @@ def on_pyramid(ctx, position_id: str, direction: str, price: float, qty: float, 
         pnl=None,
         exchange_order_id=None,
         executed_at=executed_at,
+        client_order_id=generate_client_order_id(ctx.id, "pyramid"),
+        symbol=ctx.market_symbol,
+        order_type="market",
+        order_status="scaled",
+        reduce_only=False,
     )
     notify(
         ctx.user_id,
@@ -141,8 +153,14 @@ def on_exit(
         qty=qty,
         fee=None,
         pnl=realized_pnl,
-        exchange_order_id=None,
+        exchange_order_id=exit_exchange_order_id,
         executed_at=exit_time,
+        client_order_id=exit_client_order_id or generate_client_order_id(ctx.id, "exit"),
+        symbol=ctx.market_symbol,
+        order_type="market",
+        order_status="exited",
+        reduce_only=False,
+        exchange_payload=payload,
     )
 
     event(ctx, "trade", f"EXIT {direction} {reason} price={exit_price:.6f} pnl={realized_pnl:.4f}")

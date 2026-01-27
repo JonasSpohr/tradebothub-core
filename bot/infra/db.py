@@ -1,13 +1,58 @@
 import os
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, Optional
+
+import requests
 from supabase import Client, create_client
 
 from bot.health.reporter import get_reporter_optional
+from bot.utils.ids import generate_client_order_id
 
 _supabase: Optional[Client] = None
+_rpc_session: Optional[requests.Session] = None
 
 EMAIL_NOTIFICATION_DEFAULT_THROTTLE_SECONDS = 10 * 60
+
+
+def _rpc_headers() -> Dict[str, str]:
+    key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+    token = os.environ.get("RUNTIME_TOKEN")
+    if not key:
+        raise RuntimeError("SUPABASE_SERVICE_ROLE_KEY is required for RPC calls")
+    if not token:
+        raise RuntimeError("RUNTIME_TOKEN is required for RPC calls")
+    return {
+        "apikey": key,
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json",
+        "x-runtime-token": token,
+    }
+
+
+def _rpc_url(function: str) -> str:
+    base = os.environ.get("SUPABASE_URL")
+    if not base:
+        raise RuntimeError("SUPABASE_URL is required for RPC calls")
+    return f"{base.rstrip('/')}/rest/v1/rpc/{function}"
+
+
+def _rpc_session_instance() -> requests.Session:
+    global _rpc_session
+    if _rpc_session is None:
+        _rpc_session = requests.Session()
+    return _rpc_session
+
+
+def _call_rpc(function: str, payload: Dict[str, Any]) -> Any:
+    session = _rpc_session_instance()
+    resp = session.post(_rpc_url(function), json=payload, headers=_rpc_headers(), timeout=15)
+    try:
+        resp.raise_for_status()
+    except requests.HTTPError as exc:
+        raise RuntimeError(f"RPC {function} failed [{resp.status_code}]: {resp.text}") from exc
+    if resp.status_code == 204:
+        return None
+    return resp.json()
 
 def supabase_client() -> Client:
     """
@@ -19,13 +64,6 @@ def supabase_client() -> Client:
         key = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
         _supabase = create_client(url, key)
     return _supabase
-
-def _ensure_data(resp, ctx: str):
-    if getattr(resp, "error", None):
-        raise RuntimeError(f"{ctx}: {resp.error}")
-    if resp.data is None:
-        raise RuntimeError(f"{ctx}: empty response")
-    return resp.data
 
 def _record_db_ok():
     reporter = get_reporter_optional()
@@ -43,34 +81,16 @@ def _now_iso() -> str:
 
 def get_open_position(bot_id: str) -> Optional[Dict[str, Any]]:
     try:
-        sb = supabase_client()
-        resp = (
-            sb.table("bot_positions")
-            .select("*")
-            .eq("bot_id", bot_id)
-            .eq("status", "open")
-            .limit(1)
-            .execute()
-        )
-        data = resp.data or []
-        if not data:
-            _record_db_ok()
-            return None
+        data = _call_rpc("bot_runtime_get_position", {"p_bot_id": bot_id, "p_status": "open"})
         _record_db_ok()
-        return dict(data[0])
+        return dict(data) if data else None
     except Exception:
         _record_db_error()
         return None
 
 def set_exchange_sync_status(bot_id: str, status: str):
     try:
-        sb = supabase_client()
-        sb.table("bot_state").update(
-            {
-                "exchange_sync_status": status,
-                "updated_at": _now_iso(),
-            }
-        ).eq("bot_id", bot_id).execute()
+        _call_rpc("bot_runtime_heartbeat", {"p_bot_id": bot_id, "p_payload": {"exchange_sync_status": status}})
         _record_db_ok()
     except Exception:
         _record_db_error()
@@ -95,9 +115,13 @@ def update_position_from_exchange(
     entry_payload: dict | None = None,
 ):
     try:
-        sb = supabase_client()
-        now_iso = _now_iso()
-        updates: Dict[str, Any] = {
+        exchange_payload: Dict[str, Any] = {}
+        if payload:
+            exchange_payload.update(payload)
+        if entry_payload:
+            exchange_payload.update(entry_payload)
+        payload_data: Dict[str, Any] = {
+            "position_id": position_id,
             "qty": qty,
             "entry_price": entry_price,
             "mark_price": mark_price,
@@ -110,15 +134,11 @@ def update_position_from_exchange(
             "exchange_account_ref": exchange_account_ref,
             "exchange_position_id": exchange_position_id,
             "exchange_position_key": exchange_position_key,
-            "last_exchange_sync_at": now_iso,
-            "exchange_payload": payload or {},
+            "last_exchange_sync_at": _now_iso(),
+            "exchange_payload": exchange_payload,
             "status": "open",
         }
-        if entry_payload:
-            updates["exchange_payload"] = {**updates["exchange_payload"], **entry_payload}
-        sb.table("bot_positions").update(
-            updates
-        ).eq("bot_id", bot_id).eq("id", position_id).execute()
+        _call_rpc("bot_runtime_upsert_position", {"p_bot_id": bot_id, "p_payload": payload_data})
         _record_db_ok()
     except Exception:
         _record_db_error()
@@ -141,24 +161,26 @@ def log_order_submission(
     payload: dict | None,
 ):
     try:
-        sb = supabase_client()
-        sb.table("bot_trades").insert(
+        rpc_payload: Dict[str, Any] = {
+            "position_id": position_id,
+            "client_order_id": client_order_id,
+            "symbol": symbol,
+            "side": side,
+            "order_type": order_type,
+            "order_status": order_status,
+            "reduce_only": reduce_only,
+            "filled_qty": order_amount,
+            "avg_fill_price": order_price,
+            "exchange_payload": payload or {},
+        }
+        _call_rpc(
+            "bot_runtime_upsert_trade",
             {
-                "bot_id": bot_id,
-                "user_id": user_id,
-                "position_id": position_id,
-                "exchange_order_id": exchange_order_id,
-                "client_order_id": client_order_id,
-                "symbol": symbol,
-                "side": side,
-                "order_type": order_type,
-                "order_status": order_status,
-                "reduce_only": reduce_only,
-                "filled_qty": order_amount,
-                "avg_fill_price": order_price,
-                "exchange_payload": payload or {},
-            }
-        ).execute()
+                "p_bot_id": bot_id,
+                "p_exchange_order_id": exchange_order_id,
+                "p_payload": rpc_payload,
+            },
+        )
         _record_db_ok()
     except Exception:
         _record_db_error()
@@ -171,23 +193,18 @@ def update_trade_status(
     updates: Dict[str, Any],
 ):
     try:
-        sb = supabase_client()
-        sb.table("bot_trades").update(updates).eq("bot_id", bot_id).eq("exchange_order_id", exchange_order_id).execute()
+        _call_rpc(
+            "bot_runtime_upsert_trade",
+            {
+                "p_bot_id": bot_id,
+                "p_exchange_order_id": exchange_order_id,
+                "p_payload": updates,
+            },
+        )
         _record_db_ok()
     except Exception:
         _record_db_error()
         raise
-
-def _single(table: str, filters: Dict[str, Any]) -> Dict[str, Any]:
-    sb = supabase_client()
-    q = sb.table(table).select("*")
-    for k, v in filters.items():
-        q = q.eq(k, v)
-    resp = q.single().execute()
-    data = _ensure_data(resp, f"select {table}")
-    if not data:
-        raise RuntimeError(f"{table}: not found")
-    return dict(data)
 
 def notify(
     user_id: str,
@@ -202,18 +219,24 @@ def notify(
     """
     Fire-and-forget notification insert; failures are ignored to avoid impacting the bot loop.
     """
+    if not bot_id:
+        return
     try:
-        sb = supabase_client()
-        sb.table("notifications").insert({
-            "user_id": user_id,
-            "bot_id": bot_id,
-            "channel": channel,
+        payload = {
             "type": typ,
             "severity": severity,
             "title": title,
             "body": body,
             "metadata": metadata or {},
-        }).execute()
+        }
+        _call_rpc(
+            "bot_runtime_notify",
+            {
+                "p_bot_id": bot_id,
+                "p_channel": channel,
+                "p_payload": payload,
+            },
+        )
         _record_db_ok()
     except Exception:
         _record_db_error()
@@ -312,126 +335,76 @@ def refresh_controls(bot_id: str) -> Dict[str, Any]:
     """
     Fetch lightweight control + subscription data to allow runtime toggles.
     """
-    bot = _single("bots", {"id": bot_id})
-    control_config = bot.get("control_config") or {}
-    execution_config = bot.get("execution_config") or {}
-    sub_status = "inactive"
     try:
-        sb = supabase_client()
-        resp = sb.table("subscriptions").select("status").eq("bot_id", bot_id).limit(1).execute()
-        data = resp.data or []
-        if data:
-            sub_status = data[0].get("status") or sub_status
+        payload = _call_rpc("bot_runtime_refresh_controls", {"p_bot_id": bot_id})
+        _record_db_ok()
+        return dict(payload or {})
     except Exception:
-        pass
-    return {
-        "control_config": control_config,
-        "execution_config": execution_config,
-        "subscription_status": sub_status,
-    }
+        _record_db_error()
+        raise
 
 def touch_heartbeat(bot_id: str, user_id: str):
     """
     Update heartbeat timestamp on bot_state (preferred) or latest heartbeat event.
     """
+    iso = datetime.now(timezone.utc).isoformat()
     try:
-        sb = supabase_client()
-        iso = datetime.now(timezone.utc).isoformat()
-        sb.table("bot_state").update({"heartbeat_at": iso, "updated_at": iso}).eq("bot_id", bot_id).execute()
-        try:
-            resp = sb.table("bot_events")\
-                .select("id")\
-                .eq("bot_id", bot_id)\
-                .eq("event_type", "heartbeat")\
-                .order("created_at", desc=True)\
-                .limit(1)\
-                .execute()
-            data = resp.data or []
-            if data:
-                sb.table("bot_events").update({"message": iso}).eq("id", data[0]["id"]).execute()
-        except Exception:
-            pass
+        _call_rpc(
+            "bot_runtime_heartbeat",
+            {"p_bot_id": bot_id, "p_payload": {"heartbeat_at": iso}},
+        )
         _record_db_ok()
     except Exception:
         _record_db_error()
+    try:
+        sb = supabase_client()
+        resp = (
+            sb.table("bot_events")
+            .select("id")
+            .eq("bot_id", bot_id)
+            .eq("event_type", "heartbeat")
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        data = resp.data or []
+        if data:
+            sb.table("bot_events").update({"message": iso}).eq("id", data[0]["id"]).execute()
+    except Exception:
         pass
 
 def fetch_bot_context_row(bot_id: str) -> Dict[str, Any]:
     """
-    Fetch bot context directly from tables to avoid relying on a view.
-    Returns a dict that includes bot fields, api keys, market/exchange info, subscription status,
-    strategy definition, and strategy profile overrides.
+    Fetch bot context via RPC contract.
     """
-    sb = supabase_client()
-
-    bot = _single("bots", {"id": bot_id})
-
-    # API keys (encrypted)
-    api_keys = _single("api_keys", {"bot_id": bot_id})
-
-    # Exchange + market metadata
-    ex = _single("supported_exchanges", {"id": bot["exchange_id"]})
-    market = _single("supported_markets", {"id": bot["market_id"]})
-
-    # Subscription status (optional)
-    sub_status = "inactive"
     try:
-        sub_resp = sb.table("subscriptions").select("status").eq("bot_id", bot_id).limit(1).execute()
-        sub_data = sub_resp.data or []
-        if sub_data:
-            sub_status = sub_data[0].get("status") or sub_status
+        data = _call_rpc("bot_runtime_get_context", {"p_bot_id": bot_id})
+        _record_db_ok()
     except Exception:
-        pass
+        _record_db_error()
+        raise
+    if not data:
+        raise RuntimeError(f"bot_runtime_get_context returned no data for bot_id={bot_id}")
+    bot = data.get("bot") or {}
+    api_keys = data.get("api_keys") or {}
+    exchange = data.get("supported_exchange") or {}
+    market = data.get("supported_market") or {}
+    subscription = data.get("subscription") or {}
+    strategy_profile = data.get("strategy_profile") or {}
 
-    # Strategy definition + profile overrides
-    strategy_definition = {}
-    strategy_version = None
-    strategy_key = bot.get("strategy")
-    profile_overrides: Dict[str, Any] = {}
-    profile_key = bot.get("profile_key") or bot.get("profile")
-
-    if bot.get("strategy_version_id"):
-        strategy_version = _single("strategy_versions", {"id": bot["strategy_version_id"]})
-        strategy_definition = strategy_version.get("definition") or {}
-        try:
-            strat_row = _single("strategies", {"id": strategy_version["strategy_id"]})
-            strategy_key = strat_row.get("strategy_key", strategy_key)
-        except Exception:
-            pass
-        try:
-            if bot.get("strategy_profile_id"):
-                sp = _single("strategy_profiles", {"id": bot["strategy_profile_id"]})
-                profile_overrides = sp.get("overrides") or {}
-                profile_key = sp.get("profile_key", profile_key)
-            elif profile_key:
-                sp_resp = (
-                    sb.table("strategy_profiles")
-                    .select("id,overrides,profile_key")
-                    .eq("strategy_version_id", bot["strategy_version_id"])
-                    .eq("profile_key", profile_key)
-                    .limit(1)
-                    .execute()
-                )
-                sp_data = sp_resp.data or []
-                if sp_data:
-                    profile_overrides = sp_data[0].get("overrides") or {}
-        except Exception:
-            pass
-
-    row = {
-        **bot,
-        "strategy_key": strategy_key,
-        "api_key_encrypted": api_keys.get("api_key_encrypted"),
-        "api_secret_encrypted": api_keys.get("api_secret_encrypted"),
-        "api_password_encrypted": api_keys.get("api_password_encrypted"),
-        "api_uid_encrypted": api_keys.get("api_uid_encrypted"),
-        "exchange_ccxt_id": ex.get("ccxt_id"),
-        "market_symbol": market.get("symbol"),
-        "subscription_status": sub_status,
-        "strategy_definition": strategy_definition,
-        "strategy_profile_overrides": profile_overrides,
-        "strategy_profile_key": profile_key,
-    }
+    row: Dict[str, Any] = dict(bot)
+    row["api_key_encrypted"] = api_keys.get("api_key_encrypted")
+    row["api_secret_encrypted"] = api_keys.get("api_secret_encrypted")
+    row["api_password_encrypted"] = api_keys.get("api_password_encrypted")
+    row["api_uid_encrypted"] = api_keys.get("api_uid_encrypted")
+    row["exchange_ccxt_id"] = exchange.get("ccxt_id")
+    row["market_symbol"] = market.get("symbol")
+    row["subscription_status"] = subscription.get("status") or "inactive"
+    row["strategy_profile_overrides"] = strategy_profile.get("overrides") or {}
+    row["strategy_profile_key"] = strategy_profile.get("profile_key") or bot.get("profile_key")
+    if not row.get("strategy_definition"):
+        row["strategy_definition"] = bot.get("strategy_definition") or {}
+    row["strategy_key"] = bot.get("strategy_key") or bot.get("strategy")
     return row
 
 def write_event(bot_id: str, user_id: str, event_type: str, message: str):
@@ -511,10 +484,7 @@ def insert_position_open(
     exchange_payload: Dict[str, Any] | None = None,
 ) -> str:
     try:
-        sb = supabase_client()
-        resp = sb.table("bot_positions").insert({
-            "bot_id": bot_id,
-            "user_id": user_id,
+        payload = {
             "direction": direction,
             "entry_price": entry_price,
             "entry_time": entry_time,
@@ -529,10 +499,13 @@ def insert_position_open(
             "exchange_account_ref": exchange_account_ref,
             "mark_price": mark_price,
             "exchange_payload": exchange_payload or {},
-        }).execute()
-        data = _ensure_data(resp, "insert_position_open")
+            "user_id": user_id,
+        }
+        resp = _call_rpc("bot_runtime_upsert_position", {"p_bot_id": bot_id, "p_payload": payload})
         _record_db_ok()
-        return str(data[0]["id"])
+        if isinstance(resp, dict) and resp.get("id"):
+            return str(resp["id"])
+        raise RuntimeError("Failed to insert position via RPC")
     except Exception:
         _record_db_error()
         raise
@@ -549,22 +522,21 @@ def close_position(
     exchange_payload: Dict[str, Any] | None = None,
 ):
     try:
-        sb = supabase_client()
-        q = sb.table("bot_positions").update({
+        if not bot_id:
+            raise RuntimeError("bot_id is required to close a position")
+        payload = {
+            "position_id": position_id,
+            "status": "closed",
             "exit_price": exit_price,
             "exit_time": exit_time,
             "realized_pnl": realized_pnl,
-            "status": "closed",
             "exit_exchange_order_id": exit_exchange_order_id,
             "exit_client_order_id": exit_client_order_id,
             "realized_pnl_source": "exchange",
             "last_exchange_sync_at": _now_iso(),
             "exchange_payload": exchange_payload or {},
-        })
-        q = q.eq("id", position_id)
-        if bot_id:
-            q = q.eq("bot_id", bot_id)
-        q.execute()
+        }
+        _call_rpc("bot_runtime_upsert_position", {"p_bot_id": bot_id, "p_payload": payload})
         _record_db_ok()
     except Exception:
         _record_db_error()
@@ -574,6 +546,7 @@ def insert_trade(
     bot_id: str,
     user_id: str,
     position_id: str | None,
+    *,
     side: str,
     price: float,
     qty: float,
@@ -581,21 +554,42 @@ def insert_trade(
     pnl: float | None,
     exchange_order_id: str | None,
     executed_at: str,
+    client_order_id: str | None = None,
+    symbol: str | None = None,
+    order_type: str | None = None,
+    order_status: str | None = None,
+    reduce_only: bool | None = None,
+    filled_qty: float | None = None,
+    avg_fill_price: float | None = None,
+    exchange_payload: Dict[str, Any] | None = None,
 ):
     try:
-        sb = supabase_client()
-        sb.table("bot_trades").insert({
-            "bot_id": bot_id,
-            "user_id": user_id,
+        client_id = client_order_id or generate_client_order_id(bot_id, "manual")
+        payload: Dict[str, Any] = {
             "position_id": position_id,
             "side": side,
             "price": price,
             "qty": qty,
             "fee": fee,
             "pnl": pnl,
-            "exchange_order_id": exchange_order_id,
             "executed_at": executed_at,
-        }).execute()
+            "client_order_id": client_id,
+            "symbol": symbol,
+            "order_type": order_type,
+            "order_status": order_status or "manual",
+            "reduce_only": reduce_only,
+            "filled_qty": filled_qty if filled_qty is not None else qty,
+            "avg_fill_price": avg_fill_price or price,
+            "exchange_payload": exchange_payload or {},
+        }
+        _call_rpc(
+            "bot_runtime_upsert_trade",
+            {
+                "p_bot_id": bot_id,
+                "p_exchange_order_id": exchange_order_id or "",
+                "p_payload": payload,
+            },
+        )
         _record_db_ok()
     except Exception:
         _record_db_error()
