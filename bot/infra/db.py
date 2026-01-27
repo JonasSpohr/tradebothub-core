@@ -55,6 +55,29 @@ def _call_rpc(function: str, payload: Dict[str, Any]) -> Any:
         return None
     return resp.json()
 
+def register_runtime(
+    bot_id: str,
+    runtime_token: str,
+    *,
+    host_ref: str | None = None,
+    process_ref: str | None = None,
+    ttl_seconds: int = 43200,
+) -> Dict[str, Any]:
+    try:
+        payload = {
+            "p_bot_id": bot_id,
+            "p_runtime_token": runtime_token,
+            "p_host_ref": host_ref,
+            "p_process_ref": process_ref,
+            "p_ttl_seconds": ttl_seconds,
+        }
+        resp = _call_rpc("bot_runtime_register", payload)
+        _record_db_ok()
+        return dict(resp or {})
+    except Exception:
+        _record_db_error()
+        raise
+
 def supabase_client() -> Client:
     """
     Lazy-init Supabase client using the service role key for full DB access.

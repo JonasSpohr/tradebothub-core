@@ -32,11 +32,14 @@ All of the runtime logic is guarded by the runtime ownership model documented in
 | `BOT_ID` | UUID of the bot row this process owns. |
 | `SUPABASE_URL` | Base URL for the Supabase project hosting the tables/RPCs. |
 | `SUPABASE_SERVICE_ROLE_KEY` | Service-role key—**never** substitute the anon key. Used for all RPC calls. |
-| `RUNTIME_TOKEN` | One-time secret hashed/stored in `bot_runtime.runtime_token_hash`; send this as `x-runtime-token` header. |
+| `RUNTIME_TOKEN` | One-time secret hashed/stored in `bot_runtime.runtime_token_hash`; send this as `x-runtime-token` header. If unset, the runtime will generate a fresh token each startup and register it automatically. |
 | `POLLING_TIER` | Optional override (`fast_5s`, `ultra_15s`, `fast_30s`, `standard`). |
 | `BOT_LOG_DIR` | Optional path to persist `tradebothub.log`. Defaults to `/app/logs`. |
 | `NEW_RELIC_LICENSE_KEY` | Optional—leave unset to skip monitoring (production uses `newrelic.ini`). |
 | `ENABLE_HEALTHCHECKS_IO` | Set to `true` to enable healthchecks.io integration; requires `HEALTHCHECKS_API_KEY`. Defaults to `false`. |
+| `HOST_REF` | Optional string added to `bot_runtime` row (default: hostname). |
+| `PROCESS_REF` | Optional runtime ID stored for observability (defaults to `pid:<pid>`). |
+| `RUNTIME_TOKEN_TTL_SECONDS` | Optional TTL passed to `bot_runtime_register` (default `43200`). |
 
 Additional runtime metadata (provider, region, machine ID) comes from `bot_runtime` and is surfaced in structured logs.
 

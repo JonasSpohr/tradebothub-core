@@ -27,7 +27,7 @@ This document captures everything a new engineer needs to know about the bot run
 
 All RPCs use service-role credentials (`SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`) and the per-runtime token (`x-runtime-token`). The bot enforces:
 
-* `bot_runtime_register` / `bot_runtime_revoke` for runtime lifecycle (not in Python yet).
+* `bot_runtime_register` / `bot_runtime_revoke` for runtime lifecycle (the Python runtime now registers itself on startup and renews the token per TTL).
 * `bot_runtime_get_context` loads bot metadata; the helper in `fetch_bot_context_row` now relies on this RPC instead of multiple tables.
 * `bot_runtime_get_position` / `bot_runtime_upsert_position` model canonical exchange sync.
 * `bot_runtime_upsert_trade` handles the journal via dual-key (client_order_id pre-ack, exchange_order_id afterwards).
@@ -50,7 +50,7 @@ All RPCs use service-role credentials (`SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KE
 
 ## 5. Operational requirements
 
-* **Environments:** `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `BOT_ID`, `POLLING_TIER` (optional), and `RUNTIME_TOKEN` must be set. The runtime consistently uses service-role headers for RPCs and never the anon key.  
+* **Environments:** `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `BOT_ID`, `POLLING_TIER` (optional), and `RUNTIME_TOKEN` must be set. The runtime consistently uses service-role headers for RPCs and never the anon key. If `RUNTIME_TOKEN` is not supplied, the bot process generates a cryptographically random token on startup, registers it via `bot_runtime_register`, and includes it in every RPC. The token survives only for that process (TTL default 43200 seconds) and is stored only as a hash in the database.  
 * **Health evidence throttles:** Tier determines flush intervals (fast/in position vs standard) plus debounce (no more than one flush every 3 seconds).  
 * **Database migrations:** `migrations/20260125_exchange_truth_full_sync.sql` and the RPC ownership migration must be applied so the RPCs expect the correct columns and indices.  
 * **Testing:** Refer to `tests/` for unit coverage (HealthWindow, HealthReporter) and integration mocks for trade/stream/position events.

@@ -1244,3 +1244,25 @@ def compute_indicator(
 
 def available_indicators() -> Iterable[str]:
     return INDICATOR_REGISTRY.keys()
+
+
+def _ensure_df(df_or_series: Union[pd.DataFrame, pd.Series], source: str):
+    if isinstance(df_or_series, pd.Series):
+        return df_or_series.to_frame(name=source)
+    return df_or_series
+
+
+def compute_rsi(series_or_df: Union[pd.Series, pd.DataFrame], window: int = 14, source: str = "close") -> pd.Series:
+    df = _ensure_df(series_or_df, source)
+    result = compute_indicator("rsi", df, {"window": window, "source": source})
+    if isinstance(result, dict):
+        return result.get("rsi") or pd.Series(dtype=float)
+    return result
+
+
+def compute_atr(df: Union[pd.Series, pd.DataFrame], window: int = 14, source: str = "close") -> pd.Series:
+    data = _ensure_df(df, source)
+    result = compute_indicator("atr", data, {"window": window, "source": source})
+    if isinstance(result, dict):
+        return result.get("atr") or pd.Series(dtype=float)
+    return result

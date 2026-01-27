@@ -305,6 +305,7 @@ def try_open_position(ctx, strategy):
     )
     STATE.in_position = True
 
+    entry_order_id = get_exchange_order_id(order)
     STATE.position_id = on_entry(
         ctx,
         STATE.direction,
@@ -315,7 +316,6 @@ def try_open_position(ctx, strategy):
         entry_client_order_id=client_order_id,
         payload=order,
     )
-    entry_order_id = get_exchange_order_id(order)
     if entry_order_id:
         update_trade_status(ctx.id, entry_order_id, updates={"position_id": STATE.position_id})
 

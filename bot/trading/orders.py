@@ -123,3 +123,7 @@ def send_order(
         if reporter:
             reporter.record_order_reject(reason)
         raise
+
+
+def get_exchange_order_id(order: Dict[str, Any] | None) -> str | None:
+    return _normalize_order_id(order)

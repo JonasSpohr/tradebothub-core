@@ -14,6 +14,7 @@ COPY requirements.txt .
 RUN pip install --upgrade pip && pip install -r requirements.txt
 
 COPY bot ./bot
+COPY newrelic.ini .
 
 ARG NEW_RELIC_ENVIRONMENT=production
 ENV NEW_RELIC_CONFIG_FILE=/app/newrelic.ini \

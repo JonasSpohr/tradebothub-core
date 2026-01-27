@@ -1,4 +1,6 @@
 import os
+import secrets
+import socket
 import threading
 import time
 
@@ -9,6 +11,7 @@ from bot.infra.db import (
     queue_email_notification,
     write_event,
     notify,
+    register_runtime,
     upsert_state,
     set_bot_status,
 )
@@ -73,6 +76,23 @@ def _resolve_configs(definition: dict, profile_overrides: dict, user_overrides: 
     exec_cfg = _merge_section(_merge_section(_merge_section(def_ec, ov_ec), user_ec), bot_ec)
     control_cfg = _merge_section(_merge_section(_merge_section(def_cc, ov_cc), user_cc), bot_cc)
     return strategy_cfg, risk_cfg, exec_cfg, control_cfg
+
+
+def ensure_runtime_token() -> str:
+    token = os.environ.get("RUNTIME_TOKEN")
+    if token:
+        return token
+    token = secrets.token_hex(32)
+    os.environ["RUNTIME_TOKEN"] = token
+    return token
+
+
+def _runtime_host_ref() -> str:
+    return os.getenv("HOST_REF") or os.getenv("HOSTNAME") or socket.gethostname()
+
+
+def _runtime_process_ref() -> str:
+    return os.getenv("PROCESS_REF") or f"pid:{os.getpid()}"
 
 def load_context(bot_id: str) -> BotContext:
     row = fetch_bot_context_row(bot_id)
@@ -140,6 +160,22 @@ def start(bot_id: str):
     from bot.runtime.gates import startup_gate
 
     init_newrelic()
+    runtime_token = ensure_runtime_token()
+    host_ref = _runtime_host_ref()
+    process_ref = _runtime_process_ref()
+    ttl_seconds = int(os.environ.get("RUNTIME_TOKEN_TTL_SECONDS", "43200"))
+    try:
+        register_runtime(
+            bot_id,
+            runtime_token,
+            host_ref=host_ref,
+            process_ref=process_ref,
+            ttl_seconds=ttl_seconds,
+        )
+        log(f"Registered runtime host={host_ref} process={process_ref}")
+    except Exception as exc:
+        log(f"Runtime registration failed: {exc}", level="ERROR")
+        raise
     try:
         ctx = load_context(bot_id)
         log(f"Loaded context for bot {ctx.id} ({ctx.name})")
