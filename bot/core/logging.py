@@ -50,12 +50,16 @@ def log(msg: str, level: str = "INFO"):
     lvl_name = level.upper()
     lvl = _LEVEL_MAP.get(lvl_name, logging.INFO)
     ts = datetime.now(timezone.utc).isoformat()
-    line = json.dumps({
-        "ts": ts,
-        "level": lvl_name.lower(),
-        "msg": msg,
-        **_context_attrs,
-    }, separators=(",", ":"), ensure_ascii=False)
+    line = json.dumps(
+        {
+            "ts": ts,
+            "level": lvl_name.lower(),
+            "msg": msg,
+            **_context_attrs,
+        },
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
     _logger.log(lvl, line)
     _maybe_send_log_api(msg, lvl_name, ts)
 
@@ -87,6 +91,36 @@ def set_log_context(**kwargs):
         if v is not None:
             _context_attrs[k] = v
 
+def send_structured_event(
+    event_type: str,
+    attributes: dict,
+    level: str = "info",
+    message: str | None = None,
+):
+    license_key = os.getenv("NEW_RELIC_LICENSE_KEY")
+    if not license_key:
+        return
+    common_attrs = _build_common_attrs()
+    now_ts = datetime.now(timezone.utc)
+    log_entry = {
+        "timestamp": int(now_ts.timestamp() * 1000),
+        "message": message or event_type,
+        "attributes": {
+            **common_attrs,
+            "eventType": event_type,
+            "level": level.lower(),
+            **_context_attrs,
+            **attributes,
+        },
+    }
+    payload = [
+        {
+            "common": {"attributes": common_attrs},
+            "logs": [log_entry],
+        }
+    ]
+    _post_new_relic_payload(payload, license_key)
+
 def _maybe_send_log_api(message: str, level: str, ts: str):
     """
     Optional: send logs via New Relic Log API for testing. Controlled by NEW_RELIC_LICENSE_KEY.
@@ -94,10 +128,32 @@ def _maybe_send_log_api(message: str, level: str, ts: str):
     license_key = os.getenv("NEW_RELIC_LICENSE_KEY")
     if not license_key:
         return
-    endpoint = os.getenv("NEW_RELIC_LOG_API", "https://log-api.newrelic.com/log/v1")
     service = os.getenv("NEW_RELIC_APP_NAME") or os.getenv("BOT_ID") or "tradebothub-bot"
+    common_attrs = _build_common_attrs(service_override=service)
+    msg_text = f"{ts} [{level}] {message}"
+    log_entry = {
+        "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000),
+        "message": msg_text,
+        "attributes": {
+            **common_attrs,
+            "level": level.lower(),
+            "message": msg_text,
+            "message_raw": message,
+            "ts": ts,
+            **_context_attrs,
+        },
+    }
+    payload = [
+        {
+            "common": {"attributes": common_attrs},
+            "logs": [log_entry],
+        }
+    ]
+    _post_new_relic_payload(payload, license_key)
 
-    common_attrs = {
+def _build_common_attrs(service_override: str | None = None) -> dict:
+    service = service_override or os.getenv("NEW_RELIC_APP_NAME") or os.getenv("BOT_ID") or "tradebothub-bot"
+    return {
         "service.name": service,
         "env": os.getenv("ENV") or "test",
         "bot_id": os.getenv("BOT_ID"),
@@ -105,27 +161,8 @@ def _maybe_send_log_api(message: str, level: str, ts: str):
         "market": os.getenv("MARKET") or os.getenv("MARKET_SYMBOL"),
     }
 
-    msg_text = f"{ts} [{level}] {message}"
-
-    payload = [
-        {
-            "common": {"attributes": common_attrs},
-            "logs": [
-                {
-                    "timestamp": int(datetime.now(timezone.utc).timestamp() * 1000),
-                    "message": msg_text,
-                    "attributes": {
-                        **common_attrs,
-                        "level": level.lower(),
-                        "message": msg_text,
-                        "message_raw": message,
-                        "ts": ts,
-                        **_context_attrs,
-                    },
-                }
-            ],
-        }
-    ]
+def _post_new_relic_payload(payload: list[dict], license_key: str):
+    endpoint = os.getenv("NEW_RELIC_LOG_API", "https://log-api.newrelic.com/log/v1")
 
     def _send():
         try:

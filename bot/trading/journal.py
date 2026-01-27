@@ -7,6 +7,7 @@ from bot.infra.db import (
     write_event,
 )
 from bot.infra.notifications import notification_context_payload
+from bot.runtime.logging_contract import emit_bot_trade
 from bot.utils.ids import generate_client_order_id
 
 TRADE_OPEN_EMAIL_TEMPLATE = "bot_trade_opened"
@@ -62,6 +63,16 @@ def on_entry(
         reduce_only=False,
         exchange_payload=payload,
     )
+    emit_bot_trade(
+        ctx,
+        action="entry",
+        side="buy" if direction == "long" else "sell",
+        qty=qty,
+        price=entry_price,
+        position_id=position_id,
+        exchange_order_id=entry_exchange_order_id,
+        notional_usd=entry_price * qty,
+    )
     notify(
         ctx.user_id,
         ctx.id,
@@ -107,6 +118,16 @@ def on_pyramid(ctx, position_id: str, direction: str, price: float, qty: float, 
         order_type="market",
         order_status="scaled",
         reduce_only=False,
+    )
+    emit_bot_trade(
+        ctx,
+        action="pyramid_add",
+        side="buy" if direction == "long" else "sell",
+        qty=qty,
+        price=price,
+        position_id=position_id,
+        exchange_order_id=None,
+        notional_usd=price * qty,
     )
     notify(
         ctx.user_id,
@@ -161,6 +182,17 @@ def on_exit(
         order_status="exited",
         reduce_only=False,
         exchange_payload=payload,
+    )
+    emit_bot_trade(
+        ctx,
+        action="exit",
+        side="sell" if direction == "long" else "buy",
+        qty=qty,
+        price=exit_price,
+        position_id=position_id,
+        exchange_order_id=exit_exchange_order_id,
+        notional_usd=exit_price * qty,
+        realized_pnl=realized_pnl,
     )
 
     event(ctx, "trade", f"EXIT {direction} {reason} price={exit_price:.6f} pnl={realized_pnl:.4f}")

@@ -8,6 +8,7 @@ from bot.core.types import BotContext
 from bot.health.reporter import get_reporter_optional
 from bot.health.types import map_exception_to_reason
 from bot.infra.db import log_order_submission, update_trade_status
+from bot.runtime.logging_contract import record_exchange_call
 from bot.utils.ids import generate_client_order_id
 
 
@@ -72,6 +73,7 @@ def send_order(
         reporter.record_order_submit()
     start = monotonic()
     try:
+        record_exchange_call()
         ticker = exchange.fetch_ticker(symbol)
         live = float(ticker.get("last") or ticker.get("close") or expected_price)
         slip = _bps_diff(live, expected_price)
@@ -82,6 +84,7 @@ def send_order(
             )
 
         log(f"[LIVE] {side.upper()} {qty:.6f} {symbol} (slip={slip:.1f}bps)")
+        record_exchange_call()
         order = exchange.create_order(
             symbol,
             order_type,

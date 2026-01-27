@@ -12,6 +12,7 @@ class BotContext:
     mode: str
     dry_run: bool
 
+    status: str
     subscription_status: str
 
     exchange_ccxt_id: str
@@ -26,3 +27,8 @@ class BotContext:
     risk_config: Json
     execution_config: Json
     control_config: Json
+
+    bot_version: Optional[str] = None
+    runtime_provider: Optional[str] = None
+    fly_region: Optional[str] = None
+    fly_machine_id: Optional[str] = None

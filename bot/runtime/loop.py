@@ -1,6 +1,6 @@
 import time
 from enum import Enum
-from typing import Optional
+from typing import Any, Optional
 
 from bot.core.logging import log
 from bot.core.safety import MAX_CONSECUTIVE_ERRORS, ERROR_BACKOFF_SECONDS, MIN_POLL_SECONDS, MAX_LEVERAGE, MAX_ALLOCATION_FRAC
@@ -13,6 +13,14 @@ from bot.infra.healthcheck import ping_healthcheck, fail_healthcheck
 from bot.infra.exchange import fetch_ohlcv_df
 from bot.runtime.scheduler import JitterScheduler
 from bot.core.config import normalize_configs, POLLING_TIER_MINIMUMS
+from bot.runtime.logging_contract import (
+    BotLogContext,
+    emit_bot_error,
+    emit_bot_gate,
+    emit_bot_heartbeat,
+    emit_bot_loop,
+    runtime_metrics,
+)
 
 from bot.health.reporter import get_reporter
 from bot.health.types import is_rate_limit_exception
@@ -27,6 +35,14 @@ class BotState(Enum):
     IN_POSITION = "in_position"
     COOLDOWN = "cooldown"
     HALT = "halt"
+
+
+def _position_snapshot() -> dict[str, Any]:
+    return {
+        "in_position": POSITION_STATE.in_position,
+        "position_id": getattr(POSITION_STATE, "position_id", None),
+        "position_side": getattr(POSITION_STATE, "direction", None),
+    }
 
 def _pause_reason(ctx: BotContext) -> Optional[str]:
     cc = ctx.control_config or {}
@@ -111,10 +127,16 @@ def run_loop(ctx: BotContext):
         level="INFO",
     )
     reporter.set_tier(poll_tier)
+    log_ctx = getattr(ctx, "_log_context", None)
+    if log_ctx is None:
+        log_ctx = BotLogContext()
+        ctx._log_context = log_ctx
 
     last_state = None
+    last_gate_reason = None
     while True:
         now = time.monotonic()
+        runtime_metrics.begin_tick()
         try:
             if exchange_sync:
                 try:
@@ -157,6 +179,16 @@ def run_loop(ctx: BotContext):
                     write_event(ctx.id, ctx.user_id, "paused", paused_reason)
                     log(f"[pause] entering idle due to {paused_reason}", level="WARN")
                 state = BotState.IDLE
+
+            position_snapshot = _position_snapshot()
+            gate_reason = pause_reason or (
+                None if ctx.control_config.get("trading_enabled", False) else "trading_disabled"
+            )
+            if gate_reason and gate_reason != last_gate_reason:
+                emit_bot_gate(ctx, log_ctx, position_snapshot, gate_reason)
+                last_gate_reason = gate_reason
+            if not gate_reason:
+                last_gate_reason = None
 
             if state == BotState.INIT:
                 write_event(ctx.id, ctx.user_id, "started", f"strategy={ctx.strategy} tf={ctx.execution_config['timeframe']}")
@@ -205,16 +237,33 @@ def run_loop(ctx: BotContext):
             # keep steady cadence with jitter, recomputing poll seconds each cycle to pick up config changes
             poll, poll_min, poll_jitter, poll_tier, requested_poll = _resolve_polling(ctx)
             reporter.set_tier(poll_tier)
+            runtime_metrics.finish_loop()
             interval = scheduler.next_interval(
                 base_override=poll,
                 jitter_override=poll_jitter,
                 min_override=poll_min,
             )
+            runtime_metrics.set_sleep_ms(interval * 1000)
+            emit_bot_loop(ctx, log_ctx, position_snapshot)
+            emit_bot_heartbeat(ctx, log_ctx, position_snapshot)
             log(f"[poll] finished state={state.value}; interval={interval:.2f}s base={poll}s min={poll_min}s jitter=+/-{poll_jitter}s req={requested_poll}s", level="DEBUG")
             scheduler.sleep_for(interval, now)
         except ExchangeSyncError:
             raise
         except Exception as e:
+            runtime_metrics.finish_loop()
+            position_snapshot = _position_snapshot()
+            emit_bot_error(
+                ctx,
+                error_class=type(e).__name__,
+                error_code=str(getattr(e, "code", None)) if getattr(e, "code", None) is not None else None,
+                error_stage="loop",
+                retry_attempt=0,
+                backoff_s=0,
+                is_fatal=True,
+                exc_msg=str(e),
+                position_snapshot=position_snapshot,
+            )
             consec_errors += 1
             write_event(ctx.id, ctx.user_id, "error", str(e))
             log(f"ERROR: {e} (consecutive={consec_errors})", level="ERROR")

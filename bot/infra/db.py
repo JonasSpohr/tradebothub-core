@@ -6,6 +6,7 @@ import requests
 from supabase import Client, create_client
 
 from bot.health.reporter import get_reporter_optional
+from bot.runtime.logging_contract import record_db_write
 from bot.utils.ids import generate_client_order_id
 
 _supabase: Optional[Client] = None
@@ -67,6 +68,10 @@ def supabase_client() -> Client:
 
 def _record_db_ok():
     reporter = get_reporter_optional()
+    try:
+        record_db_write()
+    except Exception:
+        pass
     if reporter:
         reporter.record_db_ok()
 

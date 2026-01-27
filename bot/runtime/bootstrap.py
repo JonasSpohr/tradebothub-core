@@ -25,6 +25,7 @@ from bot.health.reporter import HealthReporter, init_reporter, start_health_flus
 from bot.health.types import map_exception_to_reason, is_rate_limit_exception
 from bot.exchange.provider import CcxtExchangeProvider
 from bot.services.exchange_sync import ExchangeSyncError, ExchangeSyncService
+from bot.runtime.logging_contract import BotLogContext, runtime_metrics
 
 def _merge_section(base: dict, overlay: dict) -> dict:
     out = dict(base or {})
@@ -89,6 +90,12 @@ def load_context(bot_id: str) -> BotContext:
     )
     sc, rc, ec, cc = normalize_configs(sc, rc, ec, cc)
 
+    bot_status = row.get("status") or row.get("bot_status") or "unknown"
+    bot_version = row.get("bot_version") or row.get("version") or row.get("bot_version_id")
+    runtime_provider = row.get("runtime_provider") or os.getenv("RUNTIME_PROVIDER")
+    fly_region = row.get("fly_region") or os.getenv("FLY_REGION")
+    fly_machine_id = row.get("fly_machine_id") or os.getenv("FLY_MACHINE_ID")
+
     ctx = BotContext(
         id=row["id"],
         user_id=row["user_id"],
@@ -96,6 +103,10 @@ def load_context(bot_id: str) -> BotContext:
         strategy=row.get("strategy_key") or row.get("strategy"),
         mode=row["mode"],
         dry_run=bool(row["dry_run"]),
+
+        status=bot_status,
+        bot_version=bot_version,
+
         subscription_status=row["subscription_status"],
         exchange_ccxt_id=row["exchange_ccxt_id"],
         market_symbol=row["market_symbol"],
@@ -107,6 +118,10 @@ def load_context(bot_id: str) -> BotContext:
         risk_config=rc,
         execution_config=ec,
         control_config=cc,
+
+        runtime_provider=runtime_provider,
+        fly_region=fly_region,
+        fly_machine_id=fly_machine_id,
     )
     # Attach dynamic strategy instance if definition is present
     if row.get("strategy_definition"):
@@ -129,6 +144,8 @@ def start(bot_id: str):
         tier_cfg = ctx.execution_config.get("polling_tier")
         tier = tier_env or tier_cfg or "standard"
         reporter = init_reporter(ctx.id, tier=tier)
+        ctx._log_context = BotLogContext()
+        runtime_metrics.begin_tick()
         start_health_flush_loop(reporter)
         exchange_client = _exchange(ctx)
         exchange_sync = ExchangeSyncService(ctx, CcxtExchangeProvider(exchange_client))

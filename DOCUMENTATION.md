@@ -61,6 +61,18 @@ All RPCs use service-role credentials (`SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KE
 2. Ensure the `bot_runtime_*` functions honor `x-runtime-token`; the runtime must refresh tokens before expiry.  
 3. Observe health reporting delays; critical events should flush immediately via `reporter.flush_now()`.  
 4. Watch the exchange sync service: it should never scan all positions and always write through `bot_runtime_upsert_position`.  
-5. Confirm logs contain tier/reason metrics and the service-role header usage is enforced (look at `bot/infra/db._rpc_headers`).
+5. Confirm logs contain tier/reason metrics and the service-role header usage is enforced (look at `bot/infra/db._rpc_headers`).  
+
+## 7. New Relic structured logging
+
+The runtime now emits `BotHeartbeat`, `BotLoop`, `BotGate`, `BotTrade`, and `BotError` events through `bot.runtime.logging_contract`. Each event bundles identity/metadata from `BotContext`, rolling metrics, position snapshots, and policy fields such as `poll_effective_s` and `gate_reason`.  
+
+- `BotHeartbeat` is emitted every tick from `run_loop`, includes `boot_id`, `heartbeat_seq`, and `poll_*` attributes, and flags `in_position` severity.  
+- `BotLoop` carries the lightweight counters (`loop_ms`, `sleep_ms`, `exchange_calls`, `db_writes`, etc.) computed by the new `RuntimeMetrics` object.  
+- `BotGate` fires when trading is blocked by subscriptions/kill switches.  
+- `BotTrade` is emitted from every journal entry (entry/pyramid/exit) once the client-order-id flow hits the RPC boundary.  
+- `BotError` surfaces clustered runtime failures and includes stage/retry/backoff information.
+
+Structured events are sent through the existing New Relic log API integration (`bot.core.logging.send_structured_event`), keeping the transport unchanged while exposing the required `eventType` schema for dashboards and alerts.
 
 This document and the source code together provide the blueprint for onboarding a new engineer to the TradeBothub bot runtime. Follow the RPC contracts, keep journaling through the service key boundary, and rely on the health reporter for visibility. If something seems missing, check `RPCs.md`, the migrations, and the health module (`bot/health`). 

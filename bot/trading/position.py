@@ -1,3 +1,4 @@
+import time
 from datetime import datetime, timezone
 
 from bot.core.logging import log
@@ -7,6 +8,12 @@ from bot.health.types import map_exception_to_reason
 from bot.infra.crypto import decrypt
 from bot.infra.exchange import create_exchange, fetch_ohlcv_df, fetch_last_price, fetch_quote_balance
 from bot.infra.db import upsert_state, update_trade_status
+from bot.runtime.logging_contract import (
+    record_decision_time,
+    record_exchange_call,
+    record_indicator_time,
+    record_ohlcv_fetch,
+)
 from bot.trading.orders import get_exchange_order_id, send_order
 from bot.trading.sizing import compute_notional, compute_qty
 from bot.trading.exits import atr_exit_reason
@@ -44,18 +51,26 @@ def manage_open_position(ctx, strategy):
     reporter = get_reporter_optional()
     symbol = ctx.market_symbol
     try:
+        record_exchange_call()
         price = fetch_last_price(ex, symbol)
     except Exception as exc:
         _maybe_record_stream_disconnect(reporter, exc)
         raise
 
     try:
+        start = time.monotonic()
+        record_exchange_call()
         df = fetch_ohlcv_df(ex, symbol, ctx.execution_config["timeframe"], ctx.execution_config["lookback_bars"])
+        duration = (time.monotonic() - start) * 1000
+        record_ohlcv_fetch(duration, len(df))
     except Exception as exc:
         _maybe_record_stream_disconnect(reporter, exc)
         raise
     try:
+        start = time.monotonic()
         df = strategy.prepare(df, ctx.strategy_config)
+        duration = (time.monotonic() - start) * 1000
+        record_indicator_time(duration)
     except Exception as exc:
         _handle_indicator_exception(exc, reporter)
         raise
@@ -193,12 +208,19 @@ def try_open_position(ctx, strategy):
     lb = ctx.execution_config["lookback_bars"]
 
     try:
+        start = time.monotonic()
+        record_exchange_call()
         df = fetch_ohlcv_df(ex, symbol, tf, lb)
+        duration = (time.monotonic() - start) * 1000
+        record_ohlcv_fetch(duration, len(df))
     except Exception as exc:
         _maybe_record_stream_disconnect(reporter, exc)
         raise
     try:
+        start = time.monotonic()
         df = strategy.prepare(df, ctx.strategy_config)
+        duration = (time.monotonic() - start) * 1000
+        record_indicator_time(duration)
     except Exception as exc:
         _handle_indicator_exception(exc, reporter)
         raise
@@ -229,16 +251,21 @@ def try_open_position(ctx, strategy):
         log(f"[entry] skip: max trades reached for week {week_key}", level="DEBUG")
         return
 
+    decision_start = time.monotonic()
     try:
-        long_ok = strategy.long_signal(row, ctx.strategy_config)
-    except Exception as exc:
-        _handle_indicator_exception(exc, reporter)
-        raise
-    try:
-        short_ok = strategy.short_signal(row, ctx.strategy_config)
-    except Exception as exc:
-        _handle_indicator_exception(exc, reporter)
-        raise
+        try:
+            long_ok = strategy.long_signal(row, ctx.strategy_config)
+        except Exception as exc:
+            _handle_indicator_exception(exc, reporter)
+            raise
+        try:
+            short_ok = strategy.short_signal(row, ctx.strategy_config)
+        except Exception as exc:
+            _handle_indicator_exception(exc, reporter)
+            raise
+    finally:
+        decision_duration = (time.monotonic() - decision_start) * 1000
+        record_decision_time(decision_duration)
     if not long_ok and not short_ok:
         if candle_updated:
             upsert_state(ctx.id, ctx.user_id, STATE.to_dict())
@@ -249,6 +276,7 @@ def try_open_position(ctx, strategy):
     price = expected_price
 
     try:
+        record_exchange_call()
         bal = fetch_quote_balance(ex, symbol)
     except Exception as exc:
         _maybe_record_stream_disconnect(reporter, exc)
