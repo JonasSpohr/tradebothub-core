@@ -1,91 +1,14 @@
 import ast
-import os
 from typing import Any, Dict, List
+
 import pandas as pd
+
+from bot.indicators import compute_indicator
 from bot.strategies.base import Strategy
-from bot.indicators import compute_rsi, compute_atr
-
-# Whitelisted indicator functions
-def _series_from_source(df: pd.DataFrame, source: str) -> pd.Series:
-    return df[source] if source in df else df["close"]
-
-def _ema(df: pd.DataFrame, window: int, source: str, params: Dict[str, Any]) -> pd.Series:
-    return _series_from_source(df, source).ewm(span=max(1, window), adjust=False).mean()
-
-def _sma(df: pd.DataFrame, window: int, source: str, params: Dict[str, Any]) -> pd.Series:
-    span = max(1, window)
-    return _series_from_source(df, source).rolling(window=span, min_periods=span).mean()
-
-def _rsi(df: pd.DataFrame, window: int, source: str, params: Dict[str, Any]) -> pd.Series:
-    return compute_rsi(_series_from_source(df, source), max(1, window))
-
-def _atr(df: pd.DataFrame, window: int, source: str, params: Dict[str, Any]) -> pd.Series:
-    return compute_atr(df, max(1, window))
-
-def _donchian_high(df: pd.DataFrame, window: int, source: str, params: Dict[str, Any]) -> pd.Series:
-    span = max(1, window)
-    target = source if source in df else "high"
-    return df[target].rolling(window=span, min_periods=span).max()
-
-def _donchian_low(df: pd.DataFrame, window: int, source: str, params: Dict[str, Any]) -> pd.Series:
-    span = max(1, window)
-    target = source if source in df else "low"
-    return df[target].rolling(window=span, min_periods=span).min()
-
-def _vol_sma(df: pd.DataFrame, window: int, source: str, params: Dict[str, Any]) -> pd.Series:
-    span = max(1, window)
-    if source in df:
-        series = df[source]
-    else:
-        series = df.get("volume", pd.Series([0.0] * len(df), index=df.index))
-    return series.rolling(window=span, min_periods=span).mean()
-
-def _bb_mid(df: pd.DataFrame, window: int, source: str, params: Dict[str, Any]) -> pd.Series:
-    span = max(1, window)
-    return _series_from_source(df, source).rolling(window=span, min_periods=span).mean()
-
-def _bb_width(df: pd.DataFrame, window: int, source: str, params: Dict[str, Any]) -> pd.Series:
-    span = max(1, window)
-    series = _series_from_source(df, source)
-    mid = series.rolling(window=span, min_periods=span).mean()
-    std = series.rolling(window=span, min_periods=span).std(ddof=0).fillna(0.0)
-    mult = float(params.get("mult") or 2.0)
-    upper = mid + (std * mult)
-    lower = mid - (std * mult)
-    width = upper - lower
-    denom = mid.copy()
-    denom[denom == 0] = 1.0
-    return width / denom
-
-def _sentiment_score(df: pd.DataFrame, window: int, source: str, params: Dict[str, Any]) -> pd.Series:
-    env_var = params.get("env_var") or "SENTIMENT_SCORE"
-    try:
-        score = float(os.getenv(env_var, "0"))
-    except ValueError:
-        score = 0.0
-    return pd.Series([score] * len(df), index=df.index)
-
-INDICATOR_FNS = {
-    "ema": _ema,
-    "sma": _sma,
-    "rsi": _rsi,
-    "atr": _atr,
-    "donchian_high": _donchian_high,
-    "donchian_low": _donchian_low,
-    "vol_sma": _vol_sma,
-    "bb_mid": _bb_mid,
-    "bb_width": _bb_width,
-    "sentiment_score": _sentiment_score,
-}
 
 
-def _safe_name(name: str) -> str:
-    return str(name).strip()
-
-
-def _deep_get(d: Dict[str, Any], key: str, default: Any = None) -> Any:
-    val = d.get(key)
-    return val if isinstance(val, dict) else default
+def _safe_name(value: Any) -> str:
+    return str(value or "").strip()
 
 
 def _clamp_int(val: Any, default: int, min_v: int, max_v: int) -> int:
@@ -97,12 +20,7 @@ def _clamp_int(val: Any, default: int, min_v: int, max_v: int) -> int:
 
 
 class _SafeExpr:
-    """
-    Tiny AST-based boolean evaluator for indicator expressions.
-    Allows: and/or/not, comparisons, parentheses, numbers, names from row.
-    """
-
-    ALLOWED_NODES = (
+    ALLOWED = {
         ast.Expression,
         ast.BoolOp,
         ast.UnaryOp,
@@ -127,35 +45,35 @@ class _SafeExpr:
         ast.GtE,
         ast.Expr,
         ast.Load,
-    )
-    ALLOWED_BOOL_OPS = (ast.And, ast.Or)
-    ALLOWED_UNARY_OPS = (ast.Not, ast.USub, ast.UAdd)
-    ALLOWED_BIN_OPS = (ast.Add, ast.Sub, ast.Mult, ast.Div)
-    ALLOWED_CMP_OPS = (ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE)
+    }
+    BOOL_OPS = {ast.And, ast.Or}
+    UNARY_OPS = {ast.Not, ast.USub, ast.UAdd}
+    BIN_OPS = {ast.Add, ast.Sub, ast.Mult, ast.Div}
+    CMP_OPS = {ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE}
 
     def __init__(self, expr: str):
-        self.expr = expr or ""
+        self.expr = expr or "False"
         self._ast = ast.parse(self.expr, mode="eval")
         self._validate(self._ast)
 
-    def _validate(self, node):
-        if not isinstance(node, self.ALLOWED_NODES):
+    def _validate(self, node: ast.AST) -> None:
+        if type(node) not in self.ALLOWED:
             raise ValueError(f"Disallowed expression node: {type(node).__name__}")
         for child in ast.iter_child_nodes(node):
             self._validate(child)
-        if isinstance(node, ast.BoolOp) and not isinstance(node.op, self.ALLOWED_BOOL_OPS):
+        if isinstance(node, ast.BoolOp) and type(node.op) not in self.BOOL_OPS:
             raise ValueError("Disallowed boolean operator")
-        if isinstance(node, ast.UnaryOp) and not isinstance(node.op, self.ALLOWED_UNARY_OPS):
+        if isinstance(node, ast.UnaryOp) and type(node.op) not in self.UNARY_OPS:
             raise ValueError("Disallowed unary operator")
-        if isinstance(node, ast.BinOp) and not isinstance(node.op, self.ALLOWED_BIN_OPS):
+        if isinstance(node, ast.BinOp) and type(node.op) not in self.BIN_OPS:
             raise ValueError("Disallowed binary operator")
         if isinstance(node, ast.Compare):
             for op in node.ops:
-                if not isinstance(op, self.ALLOWED_CMP_OPS):
+                if type(op) not in self.CMP_OPS:
                     raise ValueError("Disallowed comparison operator")
 
     def eval(self, ctx: Dict[str, Any]) -> bool:
-        def _eval(node):
+        def _eval(node: ast.AST) -> Any:
             if isinstance(node, ast.Expression):
                 return _eval(node.body)
             if isinstance(node, ast.Constant):
@@ -233,15 +151,16 @@ class DynamicStrategy(Strategy):
         self.window_min = int(windows.get("min", 1))
         self.window_max = int(windows.get("max", 500))
 
-    def _compute_indicator(self, df: pd.DataFrame, ind: Dict[str, Any]) -> pd.Series:
+    def _compute_indicator(self, df: pd.DataFrame, ind: Dict[str, Any]) -> Dict[str, pd.Series]:
         fn_key = _safe_name(ind.get("fn"))
-        func = INDICATOR_FNS.get(fn_key)
-        if not func:
-            raise ValueError(f"Unsupported indicator fn: {fn_key}")
-        span = _clamp_int(ind.get("window"), 14, self.window_min, self.window_max)
-        source = _safe_name(ind.get("source") or "close")
-        params = ind.get("params") or {}
-        return func(df, span, source, params)
+        params = dict(ind.get("params") or {})
+        if "window" in ind:
+            params["window"] = _clamp_int(ind.get("window"), 14, self.window_min, self.window_max)
+        params["source"] = _safe_name(ind.get("source") or "close")
+        result = compute_indicator(fn_key, df, params)
+        if isinstance(result, pd.Series):
+            return {"value": result}
+        return result
 
     def prepare(self, df: pd.DataFrame, cfg: Dict[str, Any]) -> pd.DataFrame:
         df = df.copy()
@@ -250,12 +169,18 @@ class DynamicStrategy(Strategy):
             ind_id = _safe_name(ind.get("id"))
             if not ind_id:
                 continue
-            df[ind_id] = self._compute_indicator(df, ind)
+            computed = self._compute_indicator(df, ind)
+            if len(computed) == 1 and "value" in computed:
+                df[ind_id] = computed["value"]
+            else:
+                for suffix, series in computed.items():
+                    df[f"{ind_id}__{suffix}"] = series
         # Ensure ATR column present for exits/trailing logic
         if "atr" not in df.columns:
             try:
                 window = _clamp_int(cfg.get("atr_period", 14), 14, self.window_min, self.window_max)
-                df["atr"] = compute_atr(df, window)
+                atr = compute_indicator("atr", df, {"window": window})
+                df["atr"] = atr if isinstance(atr, pd.Series) else atr.get("value", pd.Series([pd.NA] * len(df), index=df.index))
             except Exception:
                 pass
         return df
