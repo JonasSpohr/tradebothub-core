@@ -75,4 +75,8 @@ The runtime now emits `BotHeartbeat`, `BotLoop`, `BotGate`, `BotTrade`, and `Bot
 
 Structured events are sent through the existing New Relic log API integration (`bot.core.logging.send_structured_event`), keeping the transport unchanged while exposing the required `eventType` schema for dashboards and alerts.
 
+## 8. Dry run behavior
+
+When a bot is configured with `dry_run = true`, the runtime forces its `mode` to `"paper"` immediately after loading context (`bot/runtime/bootstrap.py`). This guarantees every downstream component—logging, order placement, metrics, and structured events—consistently sees the bot as paper-trading, even if the persisted `mode` is `live`.
+
 This document and the source code together provide the blueprint for onboarding a new engineer to the TradeBothub bot runtime. Follow the RPC contracts, keep journaling through the service key boundary, and rely on the health reporter for visibility. If something seems missing, check `RPCs.md`, the migrations, and the health module (`bot/health`). 

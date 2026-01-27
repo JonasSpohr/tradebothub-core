@@ -123,6 +123,9 @@ def load_context(bot_id: str) -> BotContext:
         fly_region=fly_region,
         fly_machine_id=fly_machine_id,
     )
+    if ctx.dry_run:
+        # Dry-run configs must always behave as paper trading, regardless of stored mode.
+        ctx.mode = "paper"
     # Attach dynamic strategy instance if definition is present
     if row.get("strategy_definition"):
         ctx._strategy = DynamicStrategy(row["strategy_definition"])
