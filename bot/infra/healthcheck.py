@@ -7,6 +7,11 @@ from bot.infra.db import supabase_client
 RUNTIME_TABLE = "bot_runtime"
 DEFAULT_API_BASE = "https://healthchecks.io/api/v3"
 DEFAULT_PING_BASE = "https://hc-ping.com"
+ENABLE_ENV = "ENABLE_HEALTHCHECKS_IO"
+
+
+def healthchecks_enabled() -> bool:
+    return os.getenv(ENABLE_ENV, "false").lower() in {"1", "true", "yes"}
 
 def _hc_headers():
     key = os.getenv("HEALTHCHECKS_API_KEY")
@@ -31,6 +36,8 @@ def _save_hc_row(bot_id: str, hio_uuid: str):
         log(f"[healthcheck] save failed: {e}", level="WARN")
 
 def _create_healthcheck(bot_id: str, name: str, timeout_seconds: int, grace_seconds: int) -> Optional[Dict[str, str]]:
+    if not healthchecks_enabled():
+        return None
     key = os.getenv("HEALTHCHECKS_API_KEY")
     if not key:
         log("[healthcheck] HEALTHCHECKS_API_KEY not set; skipping creation", level="WARN")
@@ -69,6 +76,8 @@ def _create_healthcheck(bot_id: str, name: str, timeout_seconds: int, grace_seco
     return None
 
 def _update_healthcheck(hc_uuid: str, timeout_seconds: int, grace_seconds: int) -> bool:
+    if not healthchecks_enabled():
+        return False
     key = os.getenv("HEALTHCHECKS_API_KEY")
     if not key:
         return False
@@ -99,6 +108,8 @@ def ensure_healthcheck(bot_id: str, name: str, poll_interval: int) -> Optional[s
     Ensure a healthcheck exists for this bot. Creates via API if none saved.
     Adjusts grace/timeout on startup if they differ.
     """
+    if not healthchecks_enabled():
+        return None
     timeout_seconds = max(60, poll_interval * 2)
     grace_env = os.getenv("HEALTHCHECKS_GRACE_SECONDS")
     grace_seconds = int(grace_env) if grace_env else 900  # default 15 minutes
@@ -121,6 +132,8 @@ def ensure_healthcheck(bot_id: str, name: str, poll_interval: int) -> Optional[s
     return created.get("ping_url") if created else None
 
 def ping_healthcheck(ping_url: Optional[str]):
+    if not healthchecks_enabled():
+        return
     if not ping_url:
         return
     try:
@@ -129,6 +142,8 @@ def ping_healthcheck(ping_url: Optional[str]):
         log(f"[healthcheck] ping failed: {e}", level="WARN")
 
 def fail_healthcheck(ping_url: Optional[str], message: str | None = None):
+    if not healthchecks_enabled():
+        return
     if not ping_url:
         return
     try:

@@ -18,7 +18,7 @@ from bot.state import PositionState
 from bot.infra.crypto import decrypt
 from bot.infra.exchange import create_exchange, fetch_ohlcv_df, fetch_last_price
 from bot.infra.monitoring import record_exception
-from bot.infra.healthcheck import ensure_healthcheck
+from bot.infra.healthcheck import ensure_healthcheck, healthchecks_enabled
 from bot.strategies.dynamic import DynamicStrategy
 from bot.trading.position import STATE, _exchange
 from bot.health.reporter import HealthReporter, init_reporter, start_health_flush_loop
@@ -199,7 +199,10 @@ def start(bot_id: str):
 
         # Ensure healthcheck exists and stash ping URL on context
         poll_seconds = int(ctx.execution_config.get("effective_poll_seconds", ctx.execution_config.get("poll_interval", 300)))
-        ctx._hc_ping_url = ensure_healthcheck(ctx.id, f"bot-{ctx.name}", poll_seconds)
+        if healthchecks_enabled():
+            ctx._hc_ping_url = ensure_healthcheck(ctx.id, f"bot-{ctx.name}", poll_seconds)
+        else:
+            ctx._hc_ping_url = None
 
         write_event(ctx.id, ctx.user_id, "started", f"strategy={ctx.strategy} tf={ctx.execution_config['timeframe']}")
         write_event(ctx.id, ctx.user_id, "status", "running")

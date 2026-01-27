@@ -15,8 +15,9 @@ RUN pip install --upgrade pip && pip install -r requirements.txt
 
 COPY bot ./bot
 
+ARG NEW_RELIC_ENVIRONMENT=production
 ENV NEW_RELIC_CONFIG_FILE=/app/newrelic.ini \
-    NEW_RELIC_ENVIRONMENT=${NEW_RELIC_ENVIRONMENT:-production} \
+    NEW_RELIC_ENVIRONMENT=${NEW_RELIC_ENVIRONMENT} \
     BOT_LOG_DIR=/app/logs
 
 COPY docker-entrypoint.sh /docker-entrypoint.sh
